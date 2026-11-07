@@ -1,0 +1,30 @@
+[project]
+name = "agentlab"
+version = "0.1.0"
+description = "CodeAgent-R 底座：可信执行、评测与后训练数据引擎（实施中，见 docs/project-status.yaml）"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+agentlab = "agentlab.cli:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "torch>=2.0"]
+api = ["openai>=1.0"]
+train = [
+    "torch>=2.4,<3",
+    "transformers>=4.46,<5",
+    "peft>=0.13,<1",
+    "accelerate>=1,<2",
+    "bitsandbytes>=0.44,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

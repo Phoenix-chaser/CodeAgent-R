@@ -1,0 +1,41 @@
+# 基线实验合同（draft）：真实运行需授权后逐项填 revision/hash 并置 status
+schema_version: 1
+experiment_id: pilot-baseline-v1
+research_question: "RQ0 基线：原始模型在 smoke/dev 任务上的 success@budget 与费用分布"
+runtime:
+  kind: controlled
+  revision: null            # 待 ControlledModelRuntime 真实适配器就绪后填
+  tool_schema_hash: null
+  prompt_hash: null
+  context_policy: null
+dataset:
+  manifest_hash: null       # 待任务集扩建后计算
+  split: dev
+  grouping_unit: source_group
+  recovery_snapshot_manifest: null
+models:
+  - {name: null, revision: null}   # 授权后填真实模型
+budget:
+  primary_unit: model_requests
+  max_model_requests: 30
+  max_generated_tokens: null
+  max_wall_seconds: 600
+  candidate_selection: visible_signals_only
+repetitions:
+  inference_repeats: 3
+  training_seeds: 1
+grading:
+  grader_version: three_layer_v1
+  strict_success_definition: public_and_private_all_pass
+  infra_retry_policy: infra_error_excluded_from_macro_denominator
+analysis:
+  primary_metric: success_at_budget
+  paired_by: task_id
+  bootstrap_cluster: source_group
+  confidence_level: 0.95
+  report_unknown_cost: true
+authorization:
+  scope_source: user_grant  # 需用户明确授权（API key + 额度）后生效
+  max_real_episodes: 0
+  max_cost: null
+status: draft

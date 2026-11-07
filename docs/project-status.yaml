@@ -1,0 +1,258 @@
+schema_version: 1
+project_name: CodeAgent-R
+active_stage: reproducible_sft_pipeline
+requested_scope: 优化单卡 QLoRA 数据、训练、评测闭环，准备可复现实验证据
+current_update:
+  date: '2026-11-05'
+  guide: docs/EXPERIMENT-V6-RESULTS.md
+  entry_guide: docs/START-HERE.md
+  user_reported_gpu: single 24GB GPU
+  local_gpu_training_run: false
+  original_data_logs_and_checkpoint_available: true
+  evidence_source: 用户上传的 sft-v4-20261105-130817 训练与评测产物
+  git_head: 36c0117
+  git_note: HEAD 可正常解析；当前修改未提交，部署归档保存文件哈希
+  uploaded_run:
+    model: Qwen/Qwen2.5-Coder-7B-Instruct
+    revision: c03e6d358207e414f1eca0bb1891e29f1db0e242
+    task_counts: {train: 60, dev: 12, test: 12}
+    source_group_counts: {train: 30, dev: 6, test: 6}
+    train_samples: 204
+    train_supervised_tokens: 22061
+    optimizer_steps: 78
+    epochs: 3
+    learning_rate: 0.00002
+    elapsed_seconds: 228.52
+    peak_vram_gib: 10.3048
+    baseline_dev_token_loss: 0.372766
+    final_dev_token_loss: 0.189839
+    baseline_passed: 7
+    treatment_passed: 6
+    test_tasks: 12
+    delta_percentage_points: -8.333333
+    saved_outputs_replay: 24/24 matched
+    weights_manifest_hash: verified
+    limitation: 已诊断的 test 今后只作为诊断集合；改版后的新收益待 GPU 实测
+  validation:
+    offline_tests: 433 passed
+    full_suite_seconds: 22.81
+    command: PYTHONPATH=src python3 -m pytest tests -q
+    repaired_train_dev_reference_passes: 72
+    repaired_train_dev_bugs_reproduced: 72
+    replayed_candidates: 76
+    rejected_stale_labels: 4
+    accepted_train_samples: 60
+    accepted_dev_samples: 12
+    real_tokenizer_data_audit: 72/72 loaded; no truncation; isolated splits
+    gpu_training: not_run_locally
+    paid_api_requests: 0
+  implemented:
+  - train 参考解与隐藏测试纠错，保留原 dev/test 与来源组划分
+  - 旧候选显式重放、最小 token 编辑排序、默认每题一解及覆盖统计
+  - 保留各 epoch adapter、原子更新训练记录、checkpoint 文件哈希核验
+  - Base 参与固定 dev 执行选择，平局或无增益保留 Base
+  - 按配置与内容校验运行缓存，采集错误显式重试，all 不自动评测 test
+  pending_evidence:
+  - 当前改版在 GPU 上的短训练与 dev 执行选择
+  - 更多独立来源训练任务和未用于诊断的新盲测
+  - 匹配预算的消融、多训练 seed 与独立 test 结果
+  - 真实模型 DPO、完整工具交互 episode 与在线 RL
+  dataset_target:
+    independent_train_tasks: 500
+    independent_test_tasks: 100
+    status: planned_not_existing
+    note: 当前 84 题/42 组仍为 pilot，重复候选不增加独立任务覆盖
+historical_gpu_api_preparation:
+  date: '2026-11-01'
+  guide: docs/POSTTRAIN-GPU.md
+  api_smoke_script: examples/teacher_api_smoke.py
+  user_reported_resources:
+    gpu: NVIDIA GeForce 24GB 单卡 GPU
+    allocation: 部分份额
+    cpu_cores: 8
+    system_memory_gb: 30
+    disk_gb: 50
+    image: pytorch 2.x 镜像
+    api: OpenAI 兼容教师 API
+  resource_evidence: 用户提供配置与 nvidia-smi 输出；未连接云服务器实测训练
+  local_test_result: 230 passed in 12.44s
+  smoke_tests: 14
+  real_api_calls: 0
+  real_training_entrypoint: not implemented
+  suggested_first_model: Qwen/Qwen2.5-Coder-1.5B-Instruct
+historical_review_2026_11_01:
+  date: '2026-11-01'
+  report: docs/REVIEW-FIXES.md
+  test_result: 216 passed
+  test_seconds: 12.77
+  command: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider
+  environment: Linux / Python 3.14.4 / torch 2.14.1+cpu
+  cli_help_and_doctor: passed
+  yaml_documents_parsed: 3
+  diff_check: passed
+  real_api_calls: 0
+  real_model_training: false
+  native_windows_validation: false
+  evidence_note: 各阶段旧测试计数为历史里程碑；本节是此次复审结果。未重建干净依赖环境。
+execution_limits:
+  mode: offline
+  max_real_episodes: 0
+  max_api_cost: null
+  currency: null
+  gpu_job_authorized: false
+  note: 记录本次本地执行范围；用户在外部 GPU 训练，本次未连接该环境或运行 GPU 作业。
+environment:
+  python: 3.14.4 (Linux x86_64)
+  container_runtime: not found（docker/podman 均未安装）
+  gpu: none（无 nvidia-smi）
+  pi_version: not found（node 22 存在，pi CLI 未安装）
+  model_revision: unknown
+  torch: 2.14.1+cpu（已装，CPU 版）
+  transformers: 5.22.1
+contracts:
+  task_schema: null
+  event_schema: null
+  grader_version: null
+  tool_schema: null
+stages:
+  P00:
+    status: verified
+    evidence:
+    - tests/ 4 项 smoke 全过（pytest -q，4 passed）
+    - CLI --help 仅含 doctor（未实现命令不出现）
+    - 配置加载/校验（ConfigError 路径）有测试覆盖
+  P01:
+    status: verified
+    evidence:
+    - tests/ 28 项全过（pytest -q，含 P00 冒烟 4 项 + P01 契约 24 项）
+    - 五条验收硬标准逐条有测试：序列化往返/非法拒绝/canary 不进 prompt/未知费用≠0/退出成功≠strict_pass
+    - examples/p01_minimal.py 可运行：投影+构造 prompt+泄漏自检（canary 未出现，剥离 8 个私有字段）
+  P02:
+    status: implemented
+    evidence:
+    - tests/ 38 项全过（P02 新增 10 项）
+    - 六条验收硬标准进程级全过：隔离/超时无残留写入/快照hash一致+分支隔离/并发准入原子/幂等结算/attempt恢复不清零不重提
+    - fixture 路径逃逸与符号链接拒绝；快照篡改检测；沙箱 container 显式 unsupported 不静默回退
+    - MockRuntime 垂直链路：公开任务→准入→执行→事件→候选冻结→RunResult（费用 unknown≠0）
+    note: 容器隔离（覆盖真实 shell 工具）未验证：本机无 docker/podman。进程级实现已就绪，容器后端待资源后接入 require_backend('container')
+      路径。
+  P03:
+    status: verified
+    evidence:
+    - tests/ 52 项全过（P03 新增 14 项）
+    - 6 个自建迷你仓库任务（5 source_group，off_by_one/boundary_null/state_consistency/exception_propagation/type_confusion）全部：原始缺陷公开测试可复现
+      + 参考补丁 strict_pass
+    - 审计候选库五类全过：参考→strict_pass；零改动→strict_fail；硬编码公开样例→partial(public过/private挂，未上当)；篡改受保护测试→invalid；越权路径→invalid；部分正确→strict_fail
+    - canary 与私有材料零泄漏（fixture 内容级检查）；split 完整性校验（source_group 不跨 split）
+    - grader 全新环境判分：冻结候选 diff → git apply 到新 fixture 工作区 → 注入私有测试 → pytest 子进程黑盒
+    note: P02 的候选冻结格式已升级为标准 a/b 可移植补丁（回归 10 项全过）。
+  P04:
+    status: verified
+    evidence:
+    - tests/ 64 项全过（P04 新增 12 项）
+    - fake executable 契约八场景全过：合法流/缺usage(unknown≠0)/非零退出/stderr隔离/重复事件去重/截断末行不成事件/缺终止事件不判成功/超时取消
+    - StreamAssembler 归一化：event_id 仅透传去重、(episode,attempt,seq) 序号、exit0+缺termination=missing_termination
+    - 统一工具层 read/search/patch/command：相对路径+逃逸拒绝+截断标记+错误分类（诊断非零≠动作错误）
+    - ControlledModelRuntime：candidate_fn 注入式决策边界；同快照双候选分支互不污染实测（A补丁不进B）
+    - PiRuntime capability registry：本机 pi 未装→全项 unknown+证据；未 verified 能力拒绝执行（PiUnsupported）
+    note: P03 交接曾误标 P04 为轨迹引擎——以 devkit 为准（P04=三类运行器），已在 handoff 纠正。真实 pi/模型服务链路待资源，fake
+      契约先行。
+  P05:
+    status: implemented
+    evidence:
+    - tests/ 68 项全过（P05 新增 4 项）
+    - 实验合同加载/校验（experiment-contract 模板实例化，pilot-baseline.v1 draft，授权 0）
+    - 报表管线口径实测：宏平均 vs pooled 分开、infra 排除、unknown 费用 3 条不计入小计、无对照无提升、来源组<5 声明区间不稳定、MOCK
+      显式标注
+    - 未授权真实记录被拒绝出报表（authorization.max_real_episodes=0 → ContractError）
+    note: 真实基线运行需 API key + 额度授权：合同为 draft 状态，模型/revision/hash 字段待授权后填入并 frozen。不填预期模型分数。
+  P06:
+    status: verified
+    evidence:
+    - tests/ 74 项全过（P06 新增 6 项）
+    - 同失败快照双候选：起始状态键完全一致实测、分支写入隔离实测（补丁不进邻居）
+    - 候选 y 纯净性：candidate_message 不含工具返回（observation 无混入）
+    - 偏好构造：成功vs失败→chosen/rejected 正确；平局→None；缺verdict→None（不硬造标签）
+    - lineage：branch record 含 snapshot_id/模型revision/续跑策略版本/费用/起始预算
+    - canary 不进 branch record / prefix hash / 候选消息（公开/私有物理分离）
+    - 复审修复候选模型请求绕过准入；候选与续跑共用账本，finish 请求计数，预算拒绝保留分支记录
+    - initial_budget 记录剩余额度；费用按实际准入结算差值统计；未知 USD 不填零
+    - 非 strict_fail 标签及预算拒绝分支不构造 rejected 偏好
+  P07:
+    status: implemented_gpu_validation_pending
+    evidence:
+    - tests/ 85 项全过（P07 新增 11 项）
+    - mask 语义逐条验证：system/user/tool obs/前缀assistant历史→不监督；目标text/tool名参数/eot→监督；多token字符边界对齐
+    - 截断规则：observation 超长截断+标记；超长目标JSON丢弃不截断成非法目标；全-100样本拒绝（防分母为零）
+    - packing：块对角 attention 实测（跨样本零注意力+块内 causal）
+    - 微型 forward/backward：损失只来自监督token、分母=监督token数、梯度可回传（torch CPU）
+    - 训练配置 schema（QLoRA pilot 实例）+ 一致性钩子（真实tokenizer须过 offset 校验）
+    - 导出：checkpoint-manifest（level=offline_micro_validated 不冒充真实训练）+ dataset-manifest
+    note: 历史证据为 mask/packing 与 CPU toy 验证。现 scripts/train_sft.py 已接入真实 tokenizer、模型、QLoRA、dev 选择和 adapter 保存重载；本次尚无目标 GPU 实测收益。见 docs/POSTTRAIN-GPU.md。
+  P08:
+    status: contract-only
+    evidence:
+    - tests/ 98 项全过（P08 新增 13 项）
+    - 数据契约：10 个共同状态键强制；失败当chosen拒绝；cost-only偏好拒绝；y纯净性（无工具观察）+x无未来信息
+    - 共同状态校验：逐键对比，不一致返回差异字段列表
+    - 标准 DPO loss：-logσ(β·(margin_c-margin_r))，符号正确（正margin→小loss/负margin→大loss/平局→log2）
+    - 长度归一化变体单独命名（length_normalized_v1），与标准版不混淆
+    - collator：x前缀全-100 + y候选token监督；chosen与rejected共享完全一致的x前缀（条件一致性）
+    - micro_dpo_step：CPU可跑，reference冻结（结构保证：ref_logp作为常数传入）
+    - 复审补充极端 margin 有限 loss/梯度、全 mask 图连通、reference 梯度隔离、真实 toy 参数变化和模板仅渲染一次的回归
+    note: CPU toy optimizer 可更新参数；真实语言模型 DPO trainer、reference 模型冻结和训练后评估尚未实现。
+  P09:
+    status: contract-only
+    evidence:
+    - tests/ 109 项全过（P09 新增 11 项）
+    - 分组契约：构造/add/计算时校验 task/source_group/split/checkpoint/policy；runner 不改写轨迹来源
+    - 组内 advantage：GRPO centering+std归一化；全组同reward→零方差+全零adv+诊断注记；infra_error 排除分母
+    - GRPO loss：裁剪ratio+KL惩罚+动作mask；mask=0历史token不影响loss实测；ratio=1时loss符号正确；裁剪触发实测
+    - RLRunner 为 rollout→reward→advantage→loss 数学检查；覆盖全部轮次，形状不符拒绝；update_applied 固定为 false
+    - new/ref logps 显式字段；缺省 identity_logps 有标记；unknown 总费用与已知小计分开
+    note: 没有真实模型 forward/backward、optimizer 更新、old-policy 权重同步与在线闭环。自有模型可部署在自有 GPU，普通商业 API 轨迹不能冒充当前 policy 的 on-policy rollout。
+  P10:
+    status: pending
+    evidence: []
+  P11:
+    status: pending
+    evidence: []
+known_blockers:
+- provider 尚未接通完整 episode 的消息转换、工具响应、usage 入账与持久化；fake client 通过不等于真实服务验收
+- 上传 v4 的真实单卡 SFT 已复核，本次 v5 修改待 GPU 验证；P08 真实语言模型 DPO trainer 未实现，P09 仍为数学检查
+- 14 题为污染 smoke；现有 84 题为小规模 pilot；已分析的 12 道 test 只作诊断，尚无独立测试收益
+- 当前验证环境无 GPU / 无容器运行时；API 凭据未探测。训练耗时与费用须以真实模型/序列长度/吞吐和云端报价实测
+- ControlledModelRuntime 的模型请求/工具调用计数预算已验证；wall_seconds 尚未形成跨模型与工具的端到端强制超时，USD 上限尚未接入
+- RL 同环境/同可见历史/同剩余预算的完整状态指纹尚未接入，不能仅凭现有 task/checkpoint 字段宣称完全同状态
+- pi CLI 未安装：pi 外驱迁移实验前需安装并记录真实支持能力
+decisions:
+- PROJECT_ROOT 定为 CodeAgent-R（计划包同级目录）
+- 包名 agentlab（承接原 AgentLab 底座定位），pyproject + src 布局
+- P00 不创建任何训练/运行空实现，CLI 仅开放已验证命令
+- P01 验证库选用 pydantic v2（沿用已有依赖，extra=forbid + Literal 字面量即轻量强验证）
+- PrivateTask 不继承 PublicTask（类型隔离而非字段裁剪继承），build_prompt 运行时 isinstance 门
+- 直构校验失败抛 pydantic ValidationError；from_contract_dict 统一包装 ContractError（双层设计，测试按层断言）
+- 事件去重键冻结为 (episode_id, attempt, seq)；event_id 仅透传来源原生 ID 不合成
+- BudgetLedger.unknown_spent_dims 用 list（JSON 可序列化），unknown 贡献使 total_usd() 返回 None
+- P02 采用进程级隔离（独立工作区+参数列表子进程+进程组 SIGKILL 清理）；容器后端显式 unsupported，待资源接入，绝不静默回退宿主
+- BudgetGuard：op_id 幂等（reserve/settle 重放 no-op）+ 线程锁并发准入；unknown 结算不落 0
+- 快照哈希口径统一：manifest_hash 排除 .pristine（工作区侧）与 snapshot.json（存储侧）
+- P03：任务=自建可审计迷你仓库（来源类型1）；公开测试必须在有缺陷代码上失败（§5.4）——审计测试 test_original_bug_reproduces
+  曾抓出 5 个任务公开测试过弱的构造缺陷，已修复
+- grader 空补丁语义：零改动是合法候选进入功能层，不判 patch_apply_failed
+- P03 开发中 grader 抓出参考补丁自身缺陷（mini_io 键值空格未剥离）——审计候选库方法论的有效性实证
+executed_commands:
+- PYTHONPATH=src python3 -m pytest tests/ -q → 4 passed（P00）
+- PYTHONPATH=src python3 -m agentlab.cli doctor
+- PYTHONPATH=src python3 -m pytest tests/ -q → 28 passed（P01）
+- PYTHONPATH=src python3 examples/p01_minimal.py → canary 未泄漏，剥离 8 个私有字段（P01）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 38 passed（P02，含超时进程组清理实测）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 52 passed（P03）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 64 passed（P04）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 68 passed（P05）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 74 passed（P06）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 85 passed（P07 offline）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 98 passed（P08 offline）
+- PYTHONPATH=src python3 -m pytest tests/ -q → 109 passed（P09 offline）
+proposed_commands: []
+next_action: v6 已完成（test 60%→65%，见 docs/EXPERIMENT-V6-RESULTS.md）；后续可选：3 训练 seed 复现、多采样收窄区间、P08 真实 DPO。

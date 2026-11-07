@@ -1,0 +1,22 @@
+# P07 训练契约示例；真实 trainer 尚未实现，不能直接启动训练
+base_model_revision: Qwen/Qwen2.5-Coder-7B-Instruct   # 授权后填精确 revision/sha
+mode: qlora
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+optimizer:
+  lr: 1.0e-4
+  warmup_steps: 20
+  epochs: 2
+  batch_size: 2
+  grad_accum: 8
+  bf16: true
+context:
+  max_len: 8192
+  truncation: message_pair
+runtime:
+  device: cuda
+  seed: 42
+  gradient_checkpointing: true
