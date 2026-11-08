@@ -1,6 +1,6 @@
 # GPU 后训练实验手册
 
-基础流程编写于 2026-11-03，其后更新了 epoch 保存与 dev 执行选择。最终结果见 [v6 实验结果](EXPERIMENT-V6-RESULTS.md)。本文保留数据、训练、选择与评测的通用流程。
+基础流程编写于，其后更新了 epoch 保存与 dev 执行选择。最终结果见 [实验结果](EXPERIMENT-RESULTS.md)。本文保留数据、训练、选择与评测的通用流程。
 
 ## 1. 先解释 7/14 → 6/14
 
@@ -112,7 +112,7 @@ python scripts/train_sft.py \
   --data data/experiment/sft/train.jsonl \
   --eval-data data/experiment/sft/dev.jsonl \
   --model Qwen/Qwen2.5-Coder-7B-Instruct --revision "$MODEL_REVISION" \
-  --output checkpoints/sft-v3-seed42 \
+  --output checkpoints/sft-第1轮-seed42 \
   --epochs 3 --lr 2e-5 --batch-size 1 --grad-accum 8 \
   --max-length 2048 --lora-r 16 --lora-alpha 32 --lora-dropout 0.05 \
   --patience 2 --min-delta 0.001 --seed 42 --dry-run
@@ -146,9 +146,9 @@ python scripts/audit_tokenizer.py \
 
 ```bash
 python scripts/select_checkpoint.py \
-  --checkpoint-root checkpoints/sft-v3-seed42 \
+  --checkpoint-root checkpoints/sft-第1轮-seed42 \
   --tasks-file data/experiment/tasks.jsonl \
-  --output results/sft-v3-dev-selection
+  --output results/sft-第1轮-dev-selection
 ```
 
 后续使用 `selection.json` 的 `selected_adapter`，不要直接假定根目录 `adapter/` 是执行最优模型；值为 null 表示保留 Base。先用可审计小集合完成短训练，再扩大任务数量。前 1–2 个 epoch 已使 dev 执行能力下降时，检查样本质量、监督内容、任务覆盖和学习率；不要通过反复查看 test 选择新配方。
@@ -161,14 +161,14 @@ python scripts/select_checkpoint.py \
 python scripts/evaluate.py \
   --tasks-file data/experiment/tasks.jsonl --split test \
   --model Qwen/Qwen2.5-Coder-7B-Instruct --revision "$MODEL_REVISION" \
-  --training-data checkpoints/sft-v3-seed42/training-manifest.json \
+  --training-data checkpoints/sft-第1轮-seed42/training-manifest.json \
   --quantization nf4 --temperature 0 --seed 42 --max-new-tokens 2048 \
   --output results/base-test.json
 python scripts/evaluate.py \
   --tasks-file data/experiment/tasks.jsonl --split test \
   --model Qwen/Qwen2.5-Coder-7B-Instruct --revision "$MODEL_REVISION" \
   --adapter "$SELECTED_ADAPTER" \
-  --training-data checkpoints/sft-v3-seed42/training-manifest.json \
+  --training-data checkpoints/sft-第1轮-seed42/training-manifest.json \
   --quantization nf4 --temperature 0 --seed 42 --max-new-tokens 2048 \
   --output results/sft-test.json
 python scripts/compare.py \
@@ -205,7 +205,5 @@ python scripts/compare.py \
 | 训练记录 | 完整命令、环境锁文件、模型 commit、training manifest、loss 曲线、adapter 哈希 |
 | 评测记录 | Base/SFT 原始 JSON、协议/任务哈希、逐题诊断、比较报告、置信区间 |
 | 技术报告 | 问题定义、实现选择、消融、至少 3 个具体失败案例、局限 |
-| 可演示材料 | 一个新任务从输入到修复、测试判分、训练后对照的演示；不要展示密钥或隐藏答案 |
-
-2026-11-05 检查时 Git HEAD 可正常解析，原先对象损坏的记录已过时。实验需保存当前 commit、未提交 diff 和源码归档 SHA256，避免仅记录 commit 却遗漏本地改动。
+| 可演示材料 | 一个新任务从输入到修复、测试判分、训练后对照的演示；不要展示密钥或隐藏答案 |检查时 Git HEAD 可正常解析，原先对象损坏的记录已过时。实验需保存当前 commit、未提交 diff 和源码归档 SHA256，避免仅记录 commit 却遗漏本地改动。
 

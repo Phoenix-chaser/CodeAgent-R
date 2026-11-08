@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """Real single-GPU DPO trainer refining an existing SFT adapter.
 
+Adaptive β and group-solvable masking inspired by:
+FEST: Few-Shot Demonstration-Guided RLVR (https://arxiv.org/abs/2605.15012)
+
 Design decisions (mirroring hf_sft.py where possible):
 - policy  = base model (NF4) + SFT adapter loaded with is_trainable=True;
 - reference = the SAME SFT adapter, frozen and eval-only — DPO refines the

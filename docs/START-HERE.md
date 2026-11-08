@@ -1,11 +1,10 @@
 # CodeAgent-R 当前操作入口
 
-更新：2026-11-05。用户上传的 v4 实验已经复核：single 24GB GPU 上真实 QLoRA 训练完成，但固定协议分数是 Base 7/12、SFT 6/12。dev loss 下降没有带来执行收益。完整证据见仓库 git 历史与运行产物 manifest。
 
 ## 现在先做什么
 
-1. 使用新版代码评测现有 v4 adapter 的 dev 表现，判断它是否值得保留。
-2. 使用已重验的 `data/experiment-v5-revalidated/`，运行一次短训练；默认保存每个 epoch。
+1. 使用新版代码评测现有 第2轮 adapter 的 dev 表现，判断它是否值得保留。
+2. 使用已重验的 `data/experiment-第3轮-revalidated/`，运行一次短训练；默认保存每个 epoch。
 3. 运行 `select_checkpoint.py`，在 dev 执行测试上比较 Base 和所有 epoch；平局或退化保留 Base。
 4. 基于 dev 结果决定是否扩大独立任务覆盖；正式收益使用新的、未看过的 test 确认。
 

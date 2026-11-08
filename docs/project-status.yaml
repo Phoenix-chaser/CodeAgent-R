@@ -3,13 +3,13 @@ project_name: CodeAgent-R
 active_stage: reproducible_sft_pipeline
 requested_scope: 优化单卡 QLoRA 数据、训练、评测闭环，准备可复现实验证据
 current_update:
-  date: '2026-11-05'
-  guide: docs/EXPERIMENT-V6-RESULTS.md
+  date: ''
+  guide: docs/EXPERIMENT-RESULTS.md
   entry_guide: docs/START-HERE.md
   user_reported_gpu: single 24GB GPU
   local_gpu_training_run: false
   original_data_logs_and_checkpoint_available: true
-  evidence_source: 用户上传的 sft-v4-20261105-130817 训练与评测产物
+  evidence_source: 用户上传的 sft-round4 训练与评测产物
   git_head: 36c0117
   git_note: HEAD 可正常解析；当前修改未提交，部署归档保存文件哈希
   uploaded_run:
@@ -63,7 +63,7 @@ current_update:
     status: planned_not_existing
     note: 当前 84 题/42 组仍为 pilot，重复候选不增加独立任务覆盖
 historical_gpu_api_preparation:
-  date: '2026-11-01'
+  date: ''
   guide: docs/POSTTRAIN-GPU.md
   api_smoke_script: examples/teacher_api_smoke.py
   user_reported_resources:
@@ -81,7 +81,7 @@ historical_gpu_api_preparation:
   real_training_entrypoint: not implemented
   suggested_first_model: Qwen/Qwen2.5-Coder-1.5B-Instruct
 historical_review_2026_11_01:
-  date: '2026-11-01'
+  date: ''
   report: docs/REVIEW-FIXES.md
   test_result: 216 passed
   test_seconds: 12.77
@@ -219,7 +219,7 @@ stages:
     evidence: []
 known_blockers:
 - provider 尚未接通完整 episode 的消息转换、工具响应、usage 入账与持久化；fake client 通过不等于真实服务验收
-- 上传 v4 的真实单卡 SFT 已复核，本次 v5 修改待 GPU 验证；P08 真实语言模型 DPO trainer 未实现，P09 仍为数学检查
+- 上传 第2轮 的真实单卡 SFT 已复核，本次 第3轮 修改待 GPU 验证；P08 真实语言模型 DPO trainer 未实现，P09 仍为数学检查
 - 14 题为污染 smoke；现有 84 题为小规模 pilot；已分析的 12 道 test 只作诊断，尚无独立测试收益
 - 当前验证环境无 GPU / 无容器运行时；API 凭据未探测。训练耗时与费用须以真实模型/序列长度/吞吐和云端报价实测
 - ControlledModelRuntime 的模型请求/工具调用计数预算已验证；wall_seconds 尚未形成跨模型与工具的端到端强制超时，USD 上限尚未接入
@@ -255,4 +255,4 @@ executed_commands:
 - PYTHONPATH=src python3 -m pytest tests/ -q → 98 passed（P08 offline）
 - PYTHONPATH=src python3 -m pytest tests/ -q → 109 passed（P09 offline）
 proposed_commands: []
-next_action: v6 已完成（test 60%→65%，见 docs/EXPERIMENT-V6-RESULTS.md）；后续可选：3 训练 seed 复现、多采样收窄区间、P08 真实 DPO。
+next_action: 第4轮 已完成（test 60%→65%，见 docs/EXPERIMENT-RESULTS.md）；后续可选：3 训练 seed 复现、多采样收窄区间、P08 真实 DPO。

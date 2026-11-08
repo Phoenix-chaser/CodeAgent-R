@@ -1,9 +1,6 @@
 # FEST 论文分析与 DPO 自适应 β 改进
 
 > 来源：[FEST: Few-Shot Demonstration-Guided RLVR](https://arxiv.org/abs/2605.15012)
-> 分析日期：2026-11-08
-
-## 1. 论文核心发现
 
 FEST 在 RLVR 框架下用仅 128 条随机 SFT 示范即可显著提升 RL 性能。
 三个关键组件：监督信号（SFT on 示范）、策略内信号（模型 rollout 作为
@@ -17,7 +14,7 @@ DPO rejected）、衰减权重（防过拟合）。
 
 > **半在线 DPO ≈ 带负奖励的 REINFORCE + 加权 SFT**
 
-当策略已偏好 y⁺ 时 σ→0，梯度趋零。这就是 v7 DPO 失败的理论根因。
+当策略已偏好 y⁺ 时 σ→0，梯度趋零。这就是 DPO 失败的理论根因。
 
 ### 自适应 β（论文 Eq. 5）
 
@@ -27,14 +24,14 @@ DPO rejected）、衰减权重（防过拟合）。
 | 可解但本次失败 | β₂（小，0.01） | 温和纠正 |
 | 本次通过 | β₃（极小） | 仅正则化 |
 
-## 2. v7 DPO 失败的 FEST 解释
+## 2. DPO 失败的 FEST 解释
 
-v7 实测：`preference_accuracy=1.0` 全程不变、`reward_margin≈0`、
+DPO 实验 实测：`preference_accuracy=1.0` 全程不变、`reward_margin≈0`、
 `loss≈log(2)` — 即策略在初始就已排好序（教师 > 自身失败），DPO 无信号。
 
 根因映射：
 
-| FEST 要素 | v7 现状 | 差距 |
+| FEST 要素 | DPO 实验 现状 | 差距 |
 |---|---|---|
 | 自适应 β | ❌ 统一 0.1 | **核心缺失** |
 | 群组统计 | ❌ 不知每题通过率 | 需要 N 次采样的群组数据 |
