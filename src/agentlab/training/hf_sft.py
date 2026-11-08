@@ -451,7 +451,8 @@ def write_checkpoint_index(output_dir: Path, manifest: dict[str, Any],
         "schema_version": 1, "model": manifest["model"],
         "revision": manifest.get("revision"),
         "resolved_revision": manifest.get("resolved_revision"),
-        "selection_metric": "dev_token_loss", "selected_epoch": manifest["best_epoch"],
+        "selection_metric": manifest.get("selection_metric", "dev_token_loss"),
+        "selected_epoch": manifest.get("best_epoch"),
         "checkpoints": checkpoints,
     })
 

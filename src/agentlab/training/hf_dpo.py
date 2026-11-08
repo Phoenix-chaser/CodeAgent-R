@@ -150,7 +150,8 @@ class DPOCollator:
         ids_r, labels_r, att_r = pad_rows("input_ids_rejected", "labels_rejected")
         # group_solvable → 自适应 β 标记（None=旧格式，默认用 solvable β）
         solvable = torch.tensor(
-            [1 if item.get("group_solvable") is not False else 0
+            [0 if item.get("group_solvable") is False or
+             str(item.get("group_solvable")).lower() == "false" else 1
              for item in batch], dtype=torch.long)
         return {"input_ids_chosen": ids_c, "labels_chosen": labels_c,
                 "attention_chosen": att_c, "input_ids_rejected": ids_r,
@@ -267,6 +268,7 @@ def train_dpo(args: Any) -> dict[str, Any]:
         "kind": "dpo", "model": args.model, "revision": revision,
         "resolved_revision": getattr(
             policy_base.config, "_commit_hash", None),
+        "best_epoch": args.epochs,
         "chat_template_sha256": hashlib.sha256(
             str(tokenizer.chat_template).encode()).hexdigest(),
         "configuration": vars(args),
