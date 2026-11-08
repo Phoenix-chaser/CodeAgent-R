@@ -42,7 +42,7 @@ v6 关键配置：104 题 / 52 来源组按 0.2/0.2 冻结为 64/20/20；教师�
 | 单卡 SFT | NF4 QLoRA、完整模板与 assistant-only mask、监督 token 累积、每 epoch 保存、dev 执行选择 | 单 seed 单采样；多 seed 复现进行中 |
 | 对照报告 | 默认 greedy、固定协议/预算校验、完整生成与判分诊断、配对区间、选择数据污染检查 | 20 题区间仍宽 |
 | 运行时 | 工作区、快照、预算账本、同失败状态分支 | 进程控制不等于容器安全隔离；完整模型工具 episode 待验收 |
-| DPO | 真实 trainer + 偏好构造 + 协议内选型（v7 实测：dev 55% 未超 SFT，按协议不上线；根因=教师对模型失败构成"已满足偏好"，梯度趋零，见 [v7 DPO 实验](docs/EXPERIMENT-V7-DPO.md)） | 未做 hard-negative 配对与多轮迭代 |
+| DPO | 真实 trainer + FEST 自适应 β（不可解任务 β₁=0.1 强信号 / 可解任务 β₂=0.01 弱信号）+ hard-negative 选择 + 群组统计偏好构造（[v7 DPO](docs/EXPERIMENT-V7-DPO.md)、[FEST 分析](docs/FEST-ANALYSIS.md)） | 尚未跑改进版实验 |
 | GRPO | 共同状态契约、GRPO 数学检查 | 不是在线 RL |
 
 ## 快速开始

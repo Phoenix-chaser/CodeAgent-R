@@ -153,3 +153,48 @@ def test_micro_dpo_step_moves_policy_toward_chosen():
     assert not torch.equal(before, policy.head.weight.detach())
     # reference 不得有梯度
     assert all(p.grad is None for p in reference.parameters())
+
+
+def test_adaptive_beta_dataset_reads_group_solvable(tmp_path):
+    """DPODataset passes group_solvable through for adaptive β."""
+    records = [
+        _pair("p1", "t1", chosen="a()", rejected="b(", group_solvable=False),
+        _pair("p2", "t2", chosen="c()", rejected="d(", group_solvable=True),
+        _pair("p3", "t3", chosen="e()", rejected="f("),  # legacy
+    ]
+    data = DPODataset(_write(tmp_path, records), FakeChatTokenizer(), 2048, "train")
+    assert len(data) == 3
+    assert data[0]["group_solvable"] is False
+    assert data[1]["group_solvable"] is True
+    assert data[2]["group_solvable"] is None
+
+
+def _pair(pair_id="p1", task_id="t1", chosen="good()", rejected="bad(",
+          split="train", group_solvable=None):
+    d = {
+        "pair_id": pair_id, "task_id": task_id, "source_group": "g1",
+        "split": split,
+        "messages": [{"role": "user", "content": "fix it"}],
+        "chosen": {"role": "assistant", "content": chosen},
+        "rejected": {"role": "assistant", "content": rejected},
+    }
+    if group_solvable is not None:
+        d["group_solvable"] = group_solvable
+    return d
+
+
+def test_adaptive_beta_collator_passes_mask():
+    """Collator converts group_solvable to a long tensor."""
+    tokenizer = FakeChatTokenizer()
+    ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "q"}], add_generation_prompt=True)
+    batch = [
+        {"input_ids_chosen": ids + [1], "labels_chosen": [-100] * len(ids) + [1],
+         "input_ids_rejected": ids + [2], "labels_rejected": [-100] * len(ids) + [2],
+         "group_solvable": False},
+        {"input_ids_chosen": ids + [3], "labels_chosen": [-100] * len(ids) + [3],
+         "input_ids_rejected": ids + [4], "labels_rejected": [-100] * len(ids) + [4],
+         "group_solvable": True},
+    ]
+    out = DPOCollator(pad_token_id=0)(batch)
+    assert out["group_solvable"].tolist() == [0, 1]

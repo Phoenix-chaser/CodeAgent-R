@@ -104,6 +104,7 @@ class DPODataset(Dataset):
                 "input_ids_chosen": ids_c, "labels_chosen": labels_c,
                 "input_ids_rejected": ids_r, "labels_rejected": labels_r,
                 "pair_id": record.get("pair_id", f"line-{line_no}"),
+                "group_solvable": record.get("group_solvable"),
             })
 
     def __len__(self) -> int:
@@ -144,9 +145,14 @@ class DPOCollator:
 
         ids_c, labels_c, att_c = pad_rows("input_ids_chosen", "labels_chosen")
         ids_r, labels_r, att_r = pad_rows("input_ids_rejected", "labels_rejected")
+        # group_solvable → 自适应 β 标记（None=旧格式，默认用 solvable β）
+        solvable = torch.tensor(
+            [1 if item.get("group_solvable") is not False else 0
+             for item in batch], dtype=torch.long)
         return {"input_ids_chosen": ids_c, "labels_chosen": labels_c,
                 "attention_chosen": att_c, "input_ids_rejected": ids_r,
-                "labels_rejected": labels_r, "attention_rejected": att_r}
+                "labels_rejected": labels_r, "attention_rejected": att_r,
+                "group_solvable": solvable}
 
 
 def _logp_batch(model: torch.nn.Module, input_ids: torch.Tensor,
@@ -296,8 +302,37 @@ def train_dpo(args: Any) -> dict[str, Any]:
                 pol_r = _logp_batch(policy, batch["input_ids_rejected"],
                                     batch["labels_rejected"],
                                     batch["attention_rejected"], device, True)
-                metrics = dpo_loss(pol_c, pol_r, ref_c, ref_r, beta=args.beta)
-                loss = metrics["loss"].mean()
+                # FEST 自适应 β：不可解任务用 β₁（强），可解任务用 β₂（弱）
+                solvable_mask = batch.get("group_solvable")
+                if solvable_mask is not None and hasattr(args, "beta_solvable"):
+                    per_pair_beta = torch.where(
+                        solvable_mask.to(device) == 1,
+                        torch.tensor(args.beta_solvable, device=device),
+                        torch.tensor(args.beta_unsolvable, device=device))
+                else:
+                    per_pair_beta = torch.full((pol_c.shape[0],), args.beta,
+                                               device=device)
+                # 对 batch 内每对独立计算 DPO loss（per-pair β）
+                loss_terms = []
+                for i in range(pol_c.shape[0]):
+                    pair_metrics = dpo_loss(pol_c[i:i+1], pol_r[i:i+1],
+                                            ref_c[i:i+1], ref_r[i:i+1],
+                                            beta=float(per_pair_beta[i]))
+                    loss_terms.append(pair_metrics["loss"])
+                sigmoid_deltas = torch.stack([
+                    dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
+                             ref_r[i:i+1], beta=float(per_pair_beta[i])
+                             )["sigmoid_delta"].squeeze()
+                    for i in range(pol_c.shape[0])]).to(device)
+                reward_margins = torch.stack([
+                    dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
+                             ref_r[i:i+1], beta=float(per_pair_beta[i])
+                             )["reward_margin"].squeeze()
+                    for i in range(pol_c.shape[0])]).to(device)
+                loss = torch.stack(
+                    [dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
+                              ref_r[i:i+1], beta=float(per_pair_beta[i])
+                              )["loss"] for i in range(pol_c.shape[0])]).mean()
                 if not torch.isfinite(loss):
                     raise FloatingPointError("DPO loss is not finite")
                 loss.backward()
@@ -309,16 +344,17 @@ def train_dpo(args: Any) -> dict[str, Any]:
                 global_step += 1
                 batches += 1
                 loss_sum += float(loss)
-                acc_sum += float((metrics["sigmoid_delta"] > 0.5).float().mean())
-                margin_sum += float(metrics["reward_margin"].mean())
+                acc_sum += float((sigmoid_deltas > 0.5).float().mean())
+                margin_sum += float(reward_margins.mean())
                 entry = {
                     "step": global_step, "epoch": epoch,
-                    "loss": float(loss), "beta": args.beta,
-                    "reward_margin": float(metrics["reward_margin"].mean()),
-                    "chosen_margin": float(metrics["chosen_margin"].mean()),
-                    "rejected_margin": float(metrics["rejected_margin"].mean()),
+                    "loss": float(loss),
+                    "beta_mean": float(per_pair_beta.mean()),
+                    "beta_unsolvable": args.beta_unsolvable if hasattr(args, "beta_unsolvable") else args.beta,
+                    "beta_solvable": args.beta_solvable if hasattr(args, "beta_solvable") else args.beta,
+                    "reward_margin": float(reward_margins.mean()),
                     "preference_accuracy": float(
-                        (metrics["sigmoid_delta"] > 0.5).float().mean()),
+                        (sigmoid_deltas > 0.5).float().mean()),
                     "elapsed_s": time.time() - started,
                 }
                 log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")

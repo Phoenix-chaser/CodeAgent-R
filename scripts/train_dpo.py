@@ -22,7 +22,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", required=True)
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--beta", type=float, default=0.1)
+    parser.add_argument("--beta", type=float, default=0.1,
+                        help="Fallback β when group_solvable is absent")
+    parser.add_argument("--beta-unsolvable", type=float, default=0.1,
+                        help="β for tasks where all N student rollouts fail (FEST β₁)")
+    parser.add_argument("--beta-solvable", type=float, default=0.01,
+                        help="β for tasks the student can solve but this rollout failed (FEST β₂)")
     parser.add_argument("--lr", type=float, default=5e-7)
     parser.add_argument("--max-grad-norm", type=float, default=1.0)
     parser.add_argument("--max-length", type=int, default=2048)

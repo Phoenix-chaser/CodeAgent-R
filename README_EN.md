@@ -27,7 +27,7 @@ Key v6 facts: 104 tasks / 52 source groups frozen 64/20/20; teacher candidates m
 | SFT | NF4 QLoRA, full chat-template target masks, token-weighted accumulation, dev selection, adapter save/reload | Target-GPU memory, throughput, and quality require validation |
 | Evaluation | Greedy default, protocol/budget checks, full outputs and failure diagnostics, paired intervals | Statistical intervals do not repair leakage or test-set tuning |
 | Runtime | Workspaces, snapshots, budget ledger, branches from shared failure states | Process controls are not a validated container sandbox |
-| DPO | Real trainer + preference construction + protocol selection (v7: dev 55% did not beat SFT, not deployed per protocol; root cause: teacher-vs-self-failure pairs are already-satisfied preferences with vanishing gradients — see [v7 DPO](docs/EXPERIMENT-V7-DPO.md)) | No hard-negative pairs or iterations yet |
+| DPO | Real trainer + FEST adaptive β (unsolvable tasks get β₁=0.1 strong signal, solvable tasks get β₂=0.01) + hard-negative selection + group statistics ([v7 DPO](docs/EXPERIMENT-V7-DPO.md), [FEST analysis](docs/FEST-ANALYSIS.md)) | Improved version not yet run on GPU |
 | GRPO | Shared-state contract, GRPO math checks | Not online RL |
 
 ## Quick start

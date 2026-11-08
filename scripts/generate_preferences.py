@@ -113,12 +113,21 @@ def main() -> None:
     pairs = []
     stats = Counter()
     started = time.time()
+
+    def _ast_fingerprint(code: str) -> str:
+        try:
+            import ast as _ast
+            return _ast.dump(_ast.parse(code), include_attributes=False)
+        except (SyntaxError, ValueError):
+            return f"syntax_error:{hashlib.md5(code.encode()).hexdigest()}"
+
     with tempfile.TemporaryDirectory(prefix="dpo-pref-") as temporary:
         work = Path(temporary)
         build_all(work / "tasks", specs)
         store = TaskStore(work / "tasks")
         for position, spec in enumerate(specs, 1):
             messages = build_messages(spec)
+            group = []
             for sample_index in range(args.samples):
                 set_seed(args.seed + position * 1000 + sample_index)
                 inputs = tokenizer.apply_chat_template(
@@ -139,35 +148,55 @@ def main() -> None:
                                             dict(sample_index=sample_index))
                 verdict = record["verdict"]
                 stats[f"student_{verdict}"] += 1
-                if record["strict_pass"]:
-                    continue
-                failures = [p for p in pairs if p["task_id"] == spec["task_id"]]
-                if len(failures) >= args.min_failures_per_task:
-                    stats["cap_reached"] += 1
-                    continue
-                chosen = teachers[spec["task_id"]][len(failures) % len(teachers[spec["task_id"]])]
-                pairs.append({
-                    "pair_id": f"dpo-{spec['task_id']}-{len(failures):02d}",
-                    "task_id": spec["task_id"],
-                    "source_group": spec["source_group"],
-                    "split": args.split,
-                    "messages": messages,
-                    "chosen": {"role": "assistant", "content": chosen},
-                    "rejected": {"role": "assistant", "content": record["generated_code"]},
-                    "provenance": {
-                        "chosen_source": "teacher_strict_pass",
-                        "rejected_source": "student_" + str(args.adapter or "base"),
-                        "rejected_verdict": verdict,
-                        "rejected_failure_type": record.get("failure_type"),
-                        "rejected_sample_index": sample_index,
-                        "student_model": args.model,
-                        "student_adapter": args.adapter,
-                        "resolved_revision": resolved,
-                        "temperature": args.temperature,
-                    },
-                })
-                print(f"[{position}/{len(specs)}] {spec['task_id']} "
-                      f"pair+={len(failures) + 1} ({verdict})", flush=True)
+                group.append({"record": record, "verdict": verdict,
+                              "generated_code": record["generated_code"],
+                              "fingerprint": _ast_fingerprint(record["generated_code"])})
+            # 群组统计（FEST 自适应 β 的数据来源）
+            pass_count = sum(g["record"]["strict_pass"] for g in group)
+            group_solvable = pass_count > 0
+            group_pass_rate = pass_count / len(group)
+            failures = [g for g in group if not g["record"]["strict_pass"]]
+            if not failures:
+                continue
+            stats[f"group_{'solvable' if group_solvable else 'unsolvable'}"] += 1
+            # Hard-negative：AST 指纹聚类，选最常出现的失败模式
+            fingerprint_counts = Counter(g["fingerprint"] for g in failures)
+            hardest_fp, hardest_count = fingerprint_counts.most_common(1)[0]
+            hardest = next(g for g in failures if g["fingerprint"] == hardest_fp)
+            chosen = teachers[spec["task_id"]][0]
+            pairs.append({
+                "pair_id": f"dpo-{spec['task_id']}-00",
+                "task_id": spec["task_id"],
+                "source_group": spec["source_group"],
+                "split": args.split,
+                "messages": messages,
+                "chosen": {"role": "assistant", "content": chosen},
+                "rejected": {"role": "assistant",
+                             "content": hardest["generated_code"]},
+                "group_solvable": group_solvable,
+                "group_pass_rate": group_pass_rate,
+                "provenance": {
+                    "chosen_source": "teacher_strict_pass",
+                    "rejected_source": "student_" + str(args.adapter or "base"),
+                    "rejected_verdict": hardest["verdict"],
+                    "rejected_failure_type":
+                        hardest["record"].get("failure_type"),
+                    "rejected_sample_index":
+                        hardest["record"].get("sample_index"),
+                    "rejected_fingerprint_count": hardest_count,
+                    "rejected_total_failures": len(failures),
+                    "student_model": args.model,
+                    "student_adapter": args.adapter,
+                    "resolved_revision": resolved,
+                    "temperature": args.temperature,
+                    "group_samples": len(group),
+                    "group_pass_count": pass_count,
+                },
+            })
+            print(f"[{position}/{len(specs)}] {spec['task_id']} "
+                  f"hardest_fp×{hardest_count}/{len(failures)} fails "
+                  f"({'solvable' if group_solvable else 'UNSOVABLE'} "
+                  f"pass_rate={group_pass_rate:.0%})", flush=True)
     with output.open("x", encoding="utf-8") as handle:
         for pair in pairs:
             handle.write(json.dumps(pair, ensure_ascii=False) + "\n")
