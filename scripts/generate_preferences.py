@@ -214,8 +214,8 @@ def main() -> None:
     output.with_suffix(".manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps({k: manifest[k] for k in
-                      ("pairs", "tasks", "tasks_with_pairs", "stats")}),
-          ensure_ascii=False, flush=True)
+                      ("pairs", "tasks", "tasks_with_pairs", "stats")},
+                     ensure_ascii=False), flush=True)
 
 
 if __name__ == "__main__":
