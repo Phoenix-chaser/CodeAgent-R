@@ -219,15 +219,24 @@ def train_dpo(args: Any) -> dict[str, Any]:
         bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
 
     def load_frozen_reference() -> torch.nn.Module:
+        """Reference = Base model (no adapter), per standard DPO.
+
+        Using Base as reference creates real gradient signal: the SFT
+        policy has shifted teacher-answer probabilities up relative to
+        Base, while failure probabilities shifted less → margin > 0.
+        Using SFT as reference (policy ≡ reference at init) yields
+        σ→0 vanishing gradients when rejected comes from the same SFT.
+        """
         model = AutoModelForCausalLM.from_pretrained(
             args.model, revision=revision, quantization_config=bnb,
             device_map={"": 0}, torch_dtype=torch.bfloat16,
             attn_implementation="sdpa", trust_remote_code=False)
-        reference = PeftModel.from_pretrained(model, args.sft_adapter,
-                                              is_trainable=False)
-        reference.eval()
-        reference.config.use_cache = True
-        return reference
+        if args.reference_adapter:
+            model = PeftModel.from_pretrained(
+                model, args.reference_adapter, is_trainable=False)
+        model.eval()
+        model.config.use_cache = True
+        return model
 
     reference = load_frozen_reference()
     policy_base = AutoModelForCausalLM.from_pretrained(

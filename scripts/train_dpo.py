@@ -16,7 +16,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="DPO：SFT adapter 偏好精炼")
     parser.add_argument("--data", required=True, help="Preference pair JSONL")
     parser.add_argument("--sft-adapter", required=True,
-                        help="SFT adapter directory (policy init AND frozen reference)")
+                        help="SFT adapter directory (policy init)")
+    parser.add_argument("--reference-adapter", default=None,
+                        help="Reference adapter; omit to use Base model (standard DPO, recommended)")
     parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
     parser.add_argument("--revision", default=None)
     parser.add_argument("--output", required=True)
