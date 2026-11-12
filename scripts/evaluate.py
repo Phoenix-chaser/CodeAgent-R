@@ -180,12 +180,13 @@ def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir
     """Best-of-N sampling: try N samples, return first that passes public test,
     fallback to greedy if none pass. Ref: PerfCodeGen / Self-Execution Simulation."""
     import torch
+    from transformers import set_seed as _set_seed
     from _shared_extract import extract_code as _extract
     messages = build_messages(spec)
 
     # Phase 1: greedy baseline (always generated as fallback)
     inputs, attention = tokenize_prompt(tokenizer, messages, device)
-    set_seed(args.seed)
+    _set_seed(args.seed)
     with torch.inference_mode():
         output = model.generate(inputs, attention_mask=attention,
                                 max_new_tokens=args.max_new_tokens,
@@ -203,7 +204,7 @@ def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir
 
     # Phase 3: sample up to N times, return first public-test pass
     for trial in range(args.best_of_n):
-        set_seed(args.seed + 10000 + trial)
+        _set_seed(args.seed + 10000 + trial)
         inputs, attention = tokenize_prompt(tokenizer, messages, device)
         with torch.inference_mode():
             output = model.generate(inputs, attention_mask=attention,
