@@ -103,6 +103,7 @@ def main() -> None:
             count += 1
             stats["rft_kept"] += 1
 
+    output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("x", encoding="utf-8") as f:
         for rec in merged:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
