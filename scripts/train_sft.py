@@ -34,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-delta", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-interval", type=int, default=1)
+    parser.add_argument("--init-adapter", default=None,
+                        help="Existing adapter to continue training from (RFT)")
     parser.add_argument("--dry-run", action="store_true", help="只审计数据，不加载模型")
     parser.add_argument("--save-every-epoch", action=argparse.BooleanOptionalAction,
                         default=True, help="保留各 epoch adapter，供独立 dev 执行评测选择（默认开启）")

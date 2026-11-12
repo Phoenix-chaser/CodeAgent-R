@@ -1,7 +1,9 @@
 """Build DPO preference pairs: teacher success (chosen) vs student failure.
 
 Hard-negative selection via AST-fingerprint clustering and group-solvable
-statistics inspired by FEST (https://arxiv.org/abs/2605.15012).
+statistics inspired by:
+- FEST: Few-Shot Demonstration-Guided RLVR (https://arxiv.org/abs/2605.15012)
+- DPO: Direct Preference Optimization (https://arxiv.org/abs/2305.18290)
 
 Runs an SFT adapter (or the base model) on frozen train tasks, grades every
 sample with the three-layer grader, and pairs each strict-fail generation with

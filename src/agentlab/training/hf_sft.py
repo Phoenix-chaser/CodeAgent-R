@@ -538,7 +538,16 @@ def train(args: Any) -> dict[str, Any]:
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
                         "gate_proj", "up_proj", "down_proj"],
         task_type="CAUSAL_LM")
-    model = get_peft_model(model, lora)
+    init_adapter = getattr(args, "init_adapter", None)
+    if init_adapter:
+        # RFT: 从已有 adapter 继续 LoRA 训练（不重置权重）
+        # Ref: SWE-Gym (ICML 2025) https://arxiv.org/abs/2412.21139
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, init_adapter, is_trainable=True,
+                                          config=lora)
+        print(f"从已有 adapter 初始化: {init_adapter}", flush=True)
+    else:
+        model = get_peft_model(model, lora)
     model.print_trainable_parameters()
     if any(p.requires_grad and "lora_" not in name
            for name, p in model.named_parameters()):

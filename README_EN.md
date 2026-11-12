@@ -102,8 +102,11 @@ Inspired by [pi](https://github.com/earendil-works/pi), independently implemente
 
 ## References
 
-- [FEST](https://arxiv.org/abs/2605.15012) — adaptive β / hard-negative selection
-- [DPO](https://arxiv.org/abs/2305.18290) — Direct Preference Optimization
+- [SWE-Gym](https://arxiv.org/abs/2412.21139) — execution-feedback agent training (ICML 2025)
+- [FailForge](https://arxiv.org/abs/2608.08570) — failure recovery via diagnostic hints (2026)
+- [FEST](https://arxiv.org/abs/2605.15012) — adaptive β / hard-negative selection for DPO
+- [DPO](https://arxiv.org/abs/2305.18290) — Direct Preference Optimization (NeurIPS 2023)
+- [RFT](https://arxiv.org/abs/2308.01825) — Rejection Sampling Fine-Tuning
 - [GRPO](https://arxiv.org/abs/2402.03300) — Group Relative Policy Optimization
 
 License: MIT.

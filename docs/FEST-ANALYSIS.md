@@ -1,6 +1,8 @@
 # FEST 论文分析与 DPO 自适应 β 改进
 
-> 来源：[FEST: Few-Shot Demonstration-Guided RLVR](https://arxiv.org/abs/2605.15012)
+> 来源：
+> - [FEST: Few-Shot Demonstration-Guided RLVR](https://arxiv.org/abs/2605.15012)
+> - [DPO: Direct Preference Optimization](https://arxiv.org/abs/2305.18290, NeurIPS 2023)
 
 FEST 在 RLVR 框架下用仅 128 条随机 SFT 示范即可显著提升 RL 性能。
 三个关键组件：监督信号（SFT on 示范）、策略内信号（模型 rollout 作为
