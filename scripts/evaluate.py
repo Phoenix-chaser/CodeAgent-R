@@ -1,4 +1,9 @@
-"""Reproducible code-repair evaluation with complete generation evidence."""
+"""Reproducible code-repair evaluation with complete generation evidence.
+
+Best-of-N strategy inspired by:
+- PerfCodeGen (https://arxiv.org/abs/2412.03578)
+- Self-Execution Simulation (https://arxiv.org/abs/2604.03253)
+"""
 from __future__ import annotations
 
 import argparse
@@ -157,6 +162,68 @@ def evaluate_candidate(spec, raw, task_dir, grade_dir, metadata=None):
     return record
 
 
+def passes_public_test(spec, code, task_dir, grade_dir):
+    """Quick check: does this code pass the public test only? (for best-of-n)"""
+    try:
+        patch_file = grade_dir / f"bon-{spec['task_id']}.diff"
+        patch_file.write_text(make_patch(spec["module"], spec["buggy"], code),
+                              encoding="utf-8")
+        task = TaskStore(task_dir).load(spec["task_id"])
+        result, _ = grade(task, patch_file, grade_dir / "ws")
+        details = _.get("layers", {}).get("functional", {})
+        return details.get("public_pass") is True
+    except Exception:
+        return False
+
+
+def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir):
+    """Best-of-N sampling: try N samples, return first that passes public test,
+    fallback to greedy if none pass. Ref: PerfCodeGen / Self-Execution Simulation."""
+    import torch
+    from _shared_extract import extract_code as _extract
+    messages = build_messages(spec)
+
+    # Phase 1: greedy baseline (always generated as fallback)
+    inputs, attention = tokenize_prompt(tokenizer, messages, device)
+    set_seed(args.seed)
+    with torch.inference_mode():
+        output = model.generate(inputs, attention_mask=attention,
+                                max_new_tokens=args.max_new_tokens,
+                                do_sample=False,
+                                pad_token_id=tokenizer.pad_token_id)
+    greedy_raw = tokenizer.decode(output[0][inputs.shape[1]:],
+                                  skip_special_tokens=True)
+    greedy_code = _extract(greedy_raw)
+
+    # Phase 2: if greedy passes public test, return it (saves sampling time)
+    greedy_dir = grade_dir / f"greedy-{spec['task_id']}"
+    greedy_dir.mkdir(exist_ok=True)
+    if passes_public_test(spec, greedy_code, task_dir, greedy_dir):
+        return greedy_raw, "greedy_hit", 1
+
+    # Phase 3: sample up to N times, return first public-test pass
+    for trial in range(args.best_of_n):
+        set_seed(args.seed + 10000 + trial)
+        inputs, attention = tokenize_prompt(tokenizer, messages, device)
+        with torch.inference_mode():
+            output = model.generate(inputs, attention_mask=attention,
+                                    max_new_tokens=args.max_new_tokens,
+                                    do_sample=True,
+                                    temperature=args.sample_temperature,
+                                    top_p=1.0,
+                                    pad_token_id=tokenizer.pad_token_id)
+        raw = tokenizer.decode(output[0][inputs.shape[1]:],
+                               skip_special_tokens=True)
+        code = _extract(raw)
+        trial_dir = grade_dir / f"bon-{trial}-{spec['task_id']}"
+        trial_dir.mkdir(exist_ok=True)
+        if passes_public_test(spec, code, task_dir, trial_dir):
+            return raw, f"sample_{trial + 1}_hit", trial + 2  # +1 greedy +1 indexing
+
+    # Fallback: no sample passed public test, use greedy
+    return greedy_raw, "greedy_fallback", args.best_of_n + 1
+
+
 def error_record(spec, repeat_index, seed, error):
     return dict(task_id=spec["task_id"], source_group=spec["source_group"],
                 split=spec["split"], difficulty=spec["difficulty"], repeat_index=repeat_index,
@@ -233,24 +300,36 @@ def evaluate_gpu(args, specs, task_dir, grade_dir):
             seed = args.seed + repeat_index
             set_seed(seed)
             try:
-                inputs, attention = tokenize_prompt(tokenizer, build_messages(spec), model.device)
-                generation = dict(max_new_tokens=args.max_new_tokens,
-                                  do_sample=args.temperature > 0,
-                                  pad_token_id=tokenizer.pad_token_id)
-                if args.temperature > 0:
-                    generation.update(temperature=args.temperature, top_p=1.0, top_k=0)
                 started = time.perf_counter()
-                with torch.inference_mode():
-                    output = model.generate(inputs, attention_mask=attention,
-                                            **generation)
-                torch.cuda.synchronize()
-                generated = output[0][inputs.shape[1]:]
-                raw = tokenizer.decode(generated, skip_special_tokens=True)
-                record = evaluate_candidate(spec, raw, task_dir, grade_dir, dict(
-                    repeat_index=repeat_index, seed=seed,
-                    generation_time_s=round(time.perf_counter() - started, 4),
-                    input_tokens=inputs.shape[1], output_tokens=len(generated),
-                    hit_token_limit=len(generated) >= args.max_new_tokens))
+                if getattr(args, "strategy", "greedy") == "best-of-n":
+                    raw, bon_source, bon_trials = generate_best_of_n(
+                        model, tokenizer, spec, args, model.device,
+                        task_dir, grade_dir)
+                    record = evaluate_candidate(spec, raw, task_dir, grade_dir, dict(
+                        repeat_index=repeat_index, seed=seed,
+                        strategy="best-of-n", bon_source=bon_source,
+                        bon_trials=bon_trials,
+                        generation_time_s=round(time.perf_counter() - started, 4))
+                    )
+                else:
+                    inputs, attention = tokenize_prompt(
+                        tokenizer, build_messages(spec), model.device)
+                    generation = dict(max_new_tokens=args.max_new_tokens,
+                                      do_sample=args.temperature > 0,
+                                      pad_token_id=tokenizer.pad_token_id)
+                    if args.temperature > 0:
+                        generation.update(temperature=args.temperature, top_p=1.0, top_k=0)
+                    with torch.inference_mode():
+                        output = model.generate(inputs, attention_mask=attention,
+                                                **generation)
+                    torch.cuda.synchronize()
+                    generated = output[0][inputs.shape[1]:]
+                    raw = tokenizer.decode(generated, skip_special_tokens=True)
+                    record = evaluate_candidate(spec, raw, task_dir, grade_dir, dict(
+                        repeat_index=repeat_index, seed=seed,
+                        generation_time_s=round(time.perf_counter() - started, 4),
+                        input_tokens=inputs.shape[1], output_tokens=len(generated),
+                        hit_token_limit=len(generated) >= args.max_new_tokens))
             except Exception as error:
                 record = error_record(spec, repeat_index, seed, error)
             results.append(record)
@@ -336,6 +415,13 @@ def make_parser():
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--quantization", choices=["nf4", "bf16"], default="nf4")
+    parser.add_argument("--strategy", choices=["greedy", "best-of-n"], default="greedy",
+                        help="greedy: single decode; best-of-n: sample N times, "
+                             "return the first that passes public tests")
+    parser.add_argument("--best-of-n", type=int, default=4,
+                        help="Number of samples for --strategy best-of-n")
+    parser.add_argument("--sample-temperature", type=float, default=0.7,
+                        help="Temperature for best-of-n sampling phase")
     return parser
 
 
