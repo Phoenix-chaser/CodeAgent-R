@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="128" viewBox="0 0 920 128" role="img" aria-labelledby="title description">
+  <title id="title">Frozen benchmark split</title>
+  <desc id="description">104 repairs in 52 source groups. Each mark is one group of two tasks. Training has 32 groups, development has 10, and test has 10.</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2=".25" gradientUnits="objectBoundingBox">
+      <stop stop-color="#182439"/>
+      <stop offset="1" stop-color="#102937"/>
+    </linearGradient>
+    <pattern id="train" width="10" height="19" patternUnits="userSpaceOnUse">
+      <rect width="7" height="19" rx="2" fill="#8bb8ff"/>
+    </pattern>
+    <pattern id="dev" width="10" height="19" patternUnits="userSpaceOnUse">
+      <rect width="7" height="19" rx="2" fill="#71dbbc"/>
+    </pattern>
+    <pattern id="test" width="10" height="19" patternUnits="userSpaceOnUse">
+      <rect width="7" height="19" rx="2" fill="#ffcb83"/>
+    </pattern>
+  </defs>
+  <rect width="920" height="128" rx="12" fill="url(#paper)"/>
+  <path d="M248 23v82" stroke="#506373"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" fill="#f6f9fc">
+    <text x="26" y="67" font-size="55" font-weight="750">104</text>
+    <text x="147" y="64" font-size="23" font-weight="550">tasks</text>
+    <text x="29" y="101" font-size="18" fill="#c8d6df">52 source groups</text>
+    <g transform="translate(278 0)">
+      <text y="49" font-size="22" font-weight="650">Train · 64</text>
+      <g transform="translate(0 65)"><rect width="320" height="19" fill="url(#train)"/></g>
+      <text y="108" font-size="15" fill="#c8d6df">32 groups</text>
+    </g>
+    <g transform="translate(627 0)">
+      <text y="49" font-size="22" font-weight="650">Dev · 20</text>
+      <g transform="translate(0 65)"><rect width="100" height="19" fill="url(#dev)"/></g>
+      <text y="108" font-size="15" fill="#c8d6df">10 groups</text>
+    </g>
+    <g transform="translate(772 0)">
+      <text y="49" font-size="22" font-weight="650">Test · 20</text>
+      <g transform="translate(0 65)"><rect width="100" height="19" fill="url(#test)"/></g>
+      <text y="108" font-size="15" fill="#c8d6df">10 groups</text>
+    </g>
+  </g>
+</svg>
