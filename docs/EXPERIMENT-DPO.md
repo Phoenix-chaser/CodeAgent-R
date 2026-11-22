@@ -1,39 +1,23 @@
-# DPO 实验：实现完整、效果未达（）
+# DPO 的三轮 dev 实验
 
-P08 从"离线契约"升级为真实实现并完成端到端实验：偏好构造 → DPO 训练 →
-协议内选型。结果为负，根因清晰且可复用。
+[实验成绩单](EXPERIMENT-RESULTS.md) · [FEST 实现笔记](FEST-ANALYSIS.md)
 
-## 实现（commit 6b7c292，468 项测试）
+DPO 从已选中的 SFT adapter 继续训练。参照线是同一批 20 道 dev 题上的 Base（10/20）和 SFT（12/20）。三轮 DPO 分别通过 11、11 和 10 题，均未超过 SFT，选型流程因此保留 SFT，三轮都没有 test 分数。
 
-- `scripts/generate_preferences.py`：学生模型（SFT adapter）在 train 任务
-  温度采样 → 三层判分 → strict_fail 与教师 strict_pass 配对；共同状态 =
-  同一公开 prompt。本轮实测：64 题 × 6 采样（51 分钟），学生通过率
-  207/384=54%，产出 50 对（每题上限 1 对）。
-- `src/agentlab/training/hf_dpo.py`：policy = Base(NF4) + SFT adapter 继续
-  训练；reference = 同 adapter 冻结；chosen/rejected 共享字节级一致监督
-  前缀；偏好准确率与 reward margin 全程记录；每 epoch 不可变快照。
-- β=0.1，lr=5e-7，1 epoch（50 步，49 秒）。
+## 如何构造偏好对
 
-## 结果与根因
+在 64 道 train 题上，学生模型每题采样 6 次。384 次采样中有 207 次通过判分（约 54%）。将通过验证的教师答案作为 `chosen`，同一公开提示下学生未通过的答案作为 `rejected`，每题最多取一对，最终得到 50 对。采集耗时约 51 分钟。[偏好生成脚本](../scripts/generate_preferences.py)
 
-| 模型 | dev pass@1（20 题） |
-|---|---|
-| Base | 50% |
-| DPO | 55% |
-| SFT（选中保持） | **60%** |
+训练时，两个答案共用相同的提示前缀，只对目标 assistant token 计算对数概率。reference 冻结，每个 epoch 保存 adapter。第 1 轮使用 β=0.1、学习率 5e-7，训练 1 个 epoch，共 50 步，耗时约 49 秒。[DPO 训练入口](../scripts/train_dpo.py) · [训练实现](../src/agentlab/training/hf_dpo.py)
 
-训练日志：`preference_accuracy=1.0` 全程不变，`reward_margin≈0`，
-`loss≈log 2` 无下降。**偏好关系在初始化即被满足**：policy 与 reference 同源，
-初始 margin = β·(logp_教师 − logp_学生失败) > 0——SFT 本来就更偏好教师解而
-非自己的失败采样，sigmoid(δ)≈0.5，梯度趋零，DPO 近似 no-op。dev −1 题在
-噪声内。
+## 改动与观察
 
-按 dev 选型协议（未超 SFT 不上线），DPO 不进入 test 终评，SFT 保持选中。
+| 轮次 | 冻结 reference | β | 训练记录 | dev |
+| --- | --- | --- | --- | ---: |
+| 1 | SFT adapter | 统一 0.1 | 偏好准确率约 1，reward margin 接近 0，loss 接近 log 2 | 11/20 |
+| 2 | SFT adapter | 按采样组取 0.1 或 0.01 | 训练指标与第 1 轮相近 | 11/20 |
+| 3 | Base | 按采样组取 0.1 或 0.01 | loss 从 0.72 降至 0.63 | 10/20 |
 
-## 方法论结论
+`reward_margin` 衡量 policy 相对 reference 对两个答案的偏好差。两者在初始化时完全相同，margin 就为 0，此时损失对该 margin 的导数为 −0.5。仅凭接近零的 margin 或接近 log 2 的 loss，无法判定模型参数梯度消失。[损失函数](../src/agentlab/dpo/loss.py)
 
-1. `chosen=教师 vs rejected=模型自身失败` 的配对对 DPO 是"已答对的题"，
-   无梯度信号。有效偏好对需要 **hard negatives**：策略相对更偏爱的失败，
-   例如同一策略分布内的 pass/fail 采样对，或按 logp 排序挑选的失败。
-2. 防退化选型再次生效：DPO 未超过 SFT 时不上线，与多 seed 协议中
-   seed 43 保留 Base 同一机制、同一逻辑。
+就执行结果而言，第 2 轮调整 β 后仍通过 11 题。第 3 轮的偏好损失下降，dev 修复数却减至 10。若继续研究负样本选择，可在固定 reference、预算和 dev 题目的前提下比较配对策略。[FEST 实现笔记](FEST-ANALYSIS.md)
