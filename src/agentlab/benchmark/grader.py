@@ -72,6 +72,7 @@ class LayerRun:
     summary: dict[str, int] | None
     cases: dict[str, str] | None     # 用例 → passed | failure | error | skipped
     tail: str
+    stderr: str = ""                 # 沙箱里的进程没起来时，原因在这里
 
     @property
     def passed(self) -> bool:
@@ -92,6 +93,7 @@ class LayerRun:
             "unexpected_tests": sorted(set(cases) - self.expected),
             "non_passing_tests": sorted(name for name, status in cases.items()
                                         if status != "passed"),
+            "stderr_tail": self.stderr[-300:],
         }
 
 
@@ -187,7 +189,7 @@ def _run_layer(policy: SandboxPolicy, root: Path, layer: str,
         expected=expected or frozenset(), exit_status=outcome.exit_status,
         returncode=outcome.returncode, duration_ms=outcome.duration_ms,
         summary=parse_pytest_summary(outcome.stdout), cases=parse_junit(junit),
-        tail=outcome.stdout[-500:])
+        tail=outcome.stdout[-500:], stderr=outcome.stderr[-500:])
 
 
 _REFERENCE_CACHE: dict[tuple, dict[str, LayerRun]] = {}
@@ -223,8 +225,10 @@ def reference_runs(task: LoadedTask, work_base: Path, mode: str) -> dict[str, La
             run = _run_layer(policy, ws.root, layer)
             if run.cases is None:
                 raise GradeInfrastructureError(
-                    f"reference solution produced no test results in {layer}: "
-                    f"{run.tail[-200:]}")
+                    f"reference solution produced no test results in {layer}; if pytest "
+                    f"could not start, the sandbox does not fit this interpreter "
+                    f"(see `agentlab doctor`): {run.stderr.strip()[-300:]} "
+                    f"{run.tail.strip()[-200:]}")
             # 参考解自己收集到的用例就是它的预期集合，passed 才有意义
             runs[layer] = replace(run, expected=frozenset(run.cases))
         _REFERENCE_CACHE[key] = runs

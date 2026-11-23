@@ -146,7 +146,17 @@ hf_runtime.assert_model_supported(sys.argv[1], sys.argv[2] or None)
 print(f"模型架构检查通过: {sys.argv[1]} @ {sys.argv[2] or 'main'}")
 PY
   # 判分隔离的实际情况：landlock 不可用时候选代码只在 rlimit + 清洁环境下运行
-  pyrun -m agentlab doctor | grep -E '^sandbox\.' || true
+  pyrun -m agentlab doctor | grep -E '^sandbox\.'
+  # 在沙箱里真实启动一次解释器。放行规则按当前解释器的安装方式计算，conda、独立
+  # 构建或容器镜像里的 Python 可能缺库目录；在这里失败，好过后面每道题都判分失败
+  pyrun - <<'PY'
+import sys
+sys.path.insert(0, "src")
+from agentlab.runtime.isolation import self_test
+passed, detail = self_test()
+print(f"沙箱自检{'通过' if passed else '失败'}: {detail}")
+raise SystemExit(0 if passed else 1)
+PY
   pyrun - <<'PY'
 import torch
 assert torch.cuda.is_available(), 'CUDA 不可用：检查驱动/环境'

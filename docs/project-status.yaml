@@ -26,8 +26,8 @@ current_update:
 review_2026_11_23:
   date: '2026-11-23'
   record: docs/REVIEW-2026-11-23.md
-  offline_tests: 532 passed
-  test_seconds: 60.2
+  offline_tests: 535 passed
+  test_seconds: 55.4
   command: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider
   lint: ruff check . 通过
   grader:
@@ -37,6 +37,8 @@ review_2026_11_23:
   isolation:
     primary: kernel Landlock（Linux 5.13+），工作区只读、HOME 与 /proc 不可读、TCP 拒绝
     fallback: rlimit + 清洁环境 + 进程组清理，文件系统与网络不受限，判分详情如实记录
+    library_dirs: 由动态加载器解析解释器与扩展模块的实际依赖，不依赖 sysconfig
+    self_test: agentlab doctor 的 sandbox.selftest 在沙箱里真实启动解释器；env 阶段失败即停
     container_backend: not_implemented
   evidence:
     export: scripts/export_evidence.py

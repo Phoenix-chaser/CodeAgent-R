@@ -63,10 +63,15 @@ def _probe_gpu() -> str:
 def _sandbox_rows() -> list[tuple[str, str]]:
     """沙箱后端：只报告探测到的实际情况。"""
     try:
+        from agentlab.runtime.isolation import self_test
         from agentlab.runtime.sandbox import detect_backends
-        return [(f"sandbox.{backend.name}",
+        rows = [(f"sandbox.{backend.name}",
                  f"{'available' if backend.available else 'unavailable'}: {backend.evidence}")
                 for backend in detect_backends().values()]
+        # 探测到内核支持不等于解释器能在沙箱里启动：真实启动一次才知道
+        passed, detail = self_test()
+        rows.append(("sandbox.selftest", ("ok: " if passed else "FAILED: ") + detail))
+        return rows
     except Exception as e:  # 探测失败也如实报告
         return [("sandbox", f"probe failed: {type(e).__name__}: {e}")]
 

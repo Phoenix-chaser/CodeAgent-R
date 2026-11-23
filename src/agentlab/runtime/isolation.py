@@ -23,8 +23,10 @@ import glob
 import json
 import os
 import platform
+import re
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from agentlab.runtime.exec import ExecOutcome, run_command
@@ -293,8 +295,58 @@ def resolve_mode() -> str:
     return "process"
 
 
+_SYSTEM_LIBRARY_DIRS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/local/lib")
+
+
+def _elf_interpreter(path: str) -> str | None:
+    """ELF 可执行文件的 PT_INTERP：它需要的动态加载器的绝对路径。"""
+    import struct
+
+    with open(path, "rb") as handle:
+        header = handle.read(64)
+        if len(header) < 64 or header[:4] != b"\x7fELF":
+            return None
+        wide, little = header[4] == 2, header[5] == 1
+        fmt = "<" if little else ">"
+        size = "Q" if wide else "I"
+        if wide:
+            phoff = struct.unpack_from(fmt + "Q", header, 32)[0]
+            phentsize, phnum = struct.unpack_from(fmt + "HH", header, 54)
+        else:
+            phoff = struct.unpack_from(fmt + "I", header, 28)[0]
+            phentsize, phnum = struct.unpack_from(fmt + "HH", header, 42)
+        for index in range(phnum):
+            handle.seek(phoff + index * phentsize)
+            entry = handle.read(phentsize)
+            if struct.unpack_from(fmt + "I", entry, 0)[0] != 3:        # PT_INTERP
+                continue
+            offset = struct.unpack_from(fmt + size, entry, 8 if wide else 4)[0]
+            length = struct.unpack_from(fmt + size, entry, 32 if wide else 16)[0]
+            handle.seek(offset)
+            return handle.read(length).rstrip(b"\0").decode()
+    return None
+
+
+def _loader_libraries(loader: str | None, binary: str) -> list[str]:
+    """让动态加载器自己报告 `binary` 会映射哪些共享库，返回它们的绝对路径。"""
+    import subprocess
+
+    if not loader:
+        return []
+    try:
+        completed = subprocess.run([loader, "--list", binary], capture_output=True,
+                                   text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return re.findall(r"=>\s*(/\S+)", completed.stdout)
+
+
+@lru_cache(maxsize=1)
 def _interpreter_rules() -> list[tuple[str, list[str]]]:
-    """被测进程启动所需的解释器、标准库、site-packages 与共享库。"""
+    """被测进程启动所需的解释器、标准库、site-packages 与共享库。
+
+    解释器的布局在一个进程内不会变，所以只计算一次。
+    """
     import sysconfig
 
     granted: dict[str, set[str]] = {}
@@ -307,18 +359,57 @@ def _interpreter_rules() -> list[tuple[str, list[str]]]:
                  *sys.path):
         grant(path, _READ)
     config = sysconfig.get_config_vars()
-    for key in ("LIBDIR", "DESTSHARED"):        # libc/libpython 与扩展模块所在目录
-        if config.get(key):
-            grant(config[key], _READ_EXECUTE)
+    executable = os.path.realpath(sys.executable)
+    loader = _elf_interpreter(executable)
+    # 给执行权限的目录：解释器的扩展模块目录、它的库目录、加载器所在目录，以及
+    # 加载器为解释器和每个扩展模块实际解析出的共享库所在目录。只按 sysconfig 推断
+    # 不够：独立构建或 conda 的 Python 有自己的 lib 目录，libc 却在系统目录里。
+    library_dirs = {config.get("LIBDIR"), config.get("DESTSHARED")}
+    if loader:
+        library_dirs.add(os.path.dirname(os.path.realpath(loader)))
+    extensions = sorted(glob.glob(os.path.join(config.get("DESTSHARED") or "", "*.so")))
+    for binary in [executable, *extensions]:
+        for library in _loader_libraries(loader, binary):
+            library_dirs.add(os.path.dirname(os.path.realpath(library)))
+    for path in filter(None, library_dirs):
+        grant(path, _READ_EXECUTE)
+    # 系统库目录只给读权限：少见的依赖仍能加载，git、ssh 等程序却不可执行
+    for path in _SYSTEM_LIBRARY_DIRS:
+        grant(path, _READ)
     rules = [(path, sorted(names)) for path, names in sorted(granted.items())]
-    # 只有解释器、动态加载器和共享库可执行：/usr/bin 下的 curl、ssh 等一律拒绝
-    executables = {os.path.realpath(sys.executable)}
-    libdir = config.get("LIBDIR") or "/lib"
-    for pattern in ("/lib/ld-*.so*", "/lib64/ld-*.so*", "/usr/lib/ld-*.so*",
-                    os.path.join(libdir, "ld-*.so*")):
-        executables.update(os.path.realpath(path) for path in glob.glob(pattern))
+    # 只有解释器和动态加载器本身可作为程序执行
+    executables = {executable} | ({os.path.realpath(loader)} if loader else set())
     rules += [(path, ["READ_FILE", "EXECUTE"]) for path in sorted(executables)]
     return rules
+
+
+_SELF_TEST_CODE = ("import bz2, ctypes, decimal, hashlib, json, lzma, sqlite3, ssl, "
+                   "unicodedata, zlib; print('ok')")
+
+
+def self_test(mode: str | None = None) -> tuple[bool, str]:
+    """在沙箱里真实启动一次解释器并导入判分用到的库，返回 (是否通过, 说明)。
+
+    规则表是按当前解释器的布局算出来的。换一种安装方式（conda、独立构建、容器
+    镜像）之后解释器可能缺某个库目录，只有真正启动一次才能发现。
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="agentlab-sandbox-") as temporary:
+        workspace = Path(temporary) / "ws"
+        workspace.mkdir()
+        try:
+            policy = build_policy(workspace, Path(temporary) / "scratch", mode=mode)
+            outcome = run_sandboxed(policy, [sys.executable, "-B", "-c", _SELF_TEST_CODE],
+                                    workspace, 60)
+        except SandboxError as error:
+            return False, str(error)
+        if outcome.exit_status != "ok" or not outcome.stdout.strip().endswith("ok"):
+            detail = (outcome.stderr or outcome.stdout).strip()[-300:] \
+                or f"exit status {outcome.exit_status}"
+            return False, f"{policy.mode} sandbox cannot start {sys.executable}: {detail}"
+        return True, (f"{policy.mode}: {sys.executable} starts and imports the grading "
+                      "stack inside the sandbox")
 
 
 def build_policy(workspace: Path, scratch: Path, mode: str | None = None,

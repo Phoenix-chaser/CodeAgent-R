@@ -24,6 +24,8 @@ python -c 'import torch; assert torch.cuda.is_available() and torch.cuda.is_bf16
 | available | 文件系统与 TCP 受内核限制 |
 | unavailable | 退回到 rlimit 加清洁环境。文件系统与网络不受限，同一用户的 `/proc/<pid>/environ` 仍可读 |
 
+`sandbox.selftest` 这一行是另一回事：它在沙箱里真实启动一次当前的解释器并导入判分用到的库。内核支持 Landlock，不代表这种安装方式的 Python 一定能在沙箱里启动，conda、独立构建和容器镜像里的 Python 各有自己的库目录。这一行必须是 `ok`。`env` 阶段运行同一个自检，失败就停，并给出解释器的报错原文。
+
 以普通用户运行，root 默认被拒绝，`AGENTLAB_ALLOW_ROOT=1` 可以解除。在服务器上建议设置 `AGENTLAB_SANDBOX=required`：Landlock 不可用时直接停止，而不是降级。`AGENTLAB_SANDBOX=off` 显式关闭。
 
 已知边界：另行 `setsid` 的孙进程不受进程组清理约束；Landlock 只覆盖 TCP；同一个 pytest 进程内的对抗性代码仍可能伪造输出。需要更强的边界时应使用容器，容器后端尚未实现。[隔离实现](../src/agentlab/runtime/isolation.py)

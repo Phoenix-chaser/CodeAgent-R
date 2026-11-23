@@ -229,6 +229,20 @@ def test_secrets_do_not_reach_the_candidate(tmp_path, store, monkeypatch):
         assert probe.endswith("proc=denied:13")             # /proc 整体不可读
 
 
+def test_sandbox_startup_failure_is_an_infrastructure_error_with_the_cause(
+        tmp_path, store, monkeypatch):
+    """沙箱里的解释器没起来时，报错里要带它的 stderr，而不是笼统的“没有测试结果”。"""
+    from agentlab.runtime.exec import ExecOutcome
+
+    monkeypatch.setattr(grader, "_REFERENCE_CACHE", {})     # 参考解必须重新跑，才会经过替换掉的函数
+    monkeypatch.setattr(grader, "run_sandboxed", lambda policy, command, cwd, timeout: ExecOutcome(
+        exit_status="nonzero_exit", returncode=127, stdout="", duration_ms=3,
+        stderr="python: error while loading shared libraries: libc.so.6: cannot open shared "
+               "object file"))
+    with pytest.raises(grader.GradeInfrastructureError, match="libc.so.6"):
+        _grade(tmp_path, store.load(TID), _patch(MODULE, BUGGY, FIXED))
+
+
 def test_timeout_kills_the_whole_process_group(tmp_path, store, monkeypatch):
     task = store.load(TID)
     _grade(tmp_path, task, _patch(MODULE, BUGGY, FIXED), name="warmup.diff")

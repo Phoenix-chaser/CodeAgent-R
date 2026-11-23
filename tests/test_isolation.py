@@ -92,6 +92,45 @@ def test_only_the_interpreter_is_executable(sandbox):
     assert python.endswith("0 child-ok")
 
 
+def test_self_test_starts_the_interpreter_inside_the_sandbox():
+    """The rule table follows the interpreter's install layout; only a real start proves it."""
+    passed, detail = isolation.self_test(mode="process")
+    assert passed, detail
+    if isolation.probe_landlock().available:
+        passed, detail = isolation.self_test(mode="landlock")
+        assert passed, detail
+
+
+def test_library_directories_come_from_the_loader_not_only_from_sysconfig(monkeypatch, tmp_path):
+    """conda 与独立构建的 Python 有自己的 LIBDIR，libc 却在系统目录里。
+
+    只按 sysconfig 放行会让解释器在沙箱里起不来（CI 的 runner 上就是这样失败的）。
+    """
+    import sysconfig
+
+    real = sysconfig.get_config_vars
+    monkeypatch.setattr(sysconfig, "get_config_vars",
+                        lambda: {**real(), "LIBDIR": str(tmp_path / "lib")})
+    isolation._interpreter_rules.cache_clear()
+    try:
+        rules = dict(isolation._interpreter_rules())
+    finally:
+        isolation._interpreter_rules.cache_clear()
+    executable = os.path.realpath(sys.executable)
+    loader = isolation._elf_interpreter(executable)
+    libraries = isolation._loader_libraries(loader, executable)
+    assert libraries, "the dynamic loader reported no libraries for the interpreter"
+    for library in libraries:
+        directory = os.path.dirname(os.path.realpath(library))
+        assert "READ_FILE" in rules[directory], f"{directory} is not readable in the sandbox"
+    # 系统库目录只读：git、ssh 等程序不能在沙箱里执行
+    for directory in isolation._SYSTEM_LIBRARY_DIRS:
+        if directory in rules:
+            assert "EXECUTE" not in rules[directory], directory
+    files = {path for path, names in rules.items() if names == ["READ_FILE", "EXECUTE"]}
+    assert executable in files and len(files) == 2      # 解释器与动态加载器
+
+
 @needs_landlock
 def test_bootstrap_failure_is_an_error_not_a_fallback(sandbox):
     workspace, policy = sandbox
