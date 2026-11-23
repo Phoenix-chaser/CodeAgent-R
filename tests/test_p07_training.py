@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """P07 离线验收：mask 正确性 / 截断 / packing / 微型前向反向 / 配置 / 导出。"""
 import pytest
-import torch
 
 from agentlab.contracts import ContractError
 from agentlab.training import (

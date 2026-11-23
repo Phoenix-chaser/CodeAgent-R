@@ -4,6 +4,8 @@
 
 基座为 **Qwen2.5-Coder-7B-Instruct**。104 道 Python 修复题按 52 个来源组冻结为 train 64、dev 20、test 20。模型选择看 dev 执行通过率，终评逐题配对比较 Base 和选中模型。下列数字取自项目已有实验记录。
 
+这些实验产物此前只在本机，仓库里没有。现在可以用 `scripts/export_evidence.py` 把逐题判定和训练 manifest 脱敏导出到 `docs/evidence/`，再用 `scripts/verify_evidence.py` 重算本页引用的数字。证据包导出并提交之前，本页数字仍然无法从仓库复核。[导出步骤](POSTTRAIN-GPU.md#导出可公开的证据)
+
 ## 方法对照
 
 | 方法 | dev 通过率 | test 通过率 | 实验条件 |
@@ -29,6 +31,8 @@ DPO 三轮均止于 dev。Hybrid 和 Best-of-N 的记录只给出 test 成绩。
 | 44 | epoch 2 | 12/20 | 12/20 | 0 pp |
 
 三次选择后的 test 分数平均比 Base 高 **1.7 个百分点**，三个差值的标准差为 2.4 个百分点。95% bootstrap 区间为 **[0, +5] 个百分点**。汇总脚本先对同一道题取跨 seed 的平均差值，再对 20 道题重采样。三个 seed 共用一套 test 题。[汇总实现](../scripts/aggregate_seeds.py)
+
+这个区间按题重采样，是当时的口径。划分和泄漏检查都以来源组为独立单位，同一组的两道题高度相关，按题重采样会把它们当成两个独立观测。当前脚本默认按来源组整簇重采样，20 道 test 题来自 10 个来源组；用原始结果重算后区间可能变宽，重算的数值以证据包的复核输出为准。
 
 seed 42 的 dev 从 10/20 升到 12/20，其中 3 题改善、1 题退化。test 从 12/20 升到 13/20，1 题改善、0 题退化。三个 seed 的整体 test 得分均达到或超过 Base。[三个 seed 的结果图](images/three-seed-results.png)
 

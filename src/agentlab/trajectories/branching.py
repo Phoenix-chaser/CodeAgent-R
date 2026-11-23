@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Callable
 from uuid import uuid4
 
-from agentlab.contracts import Budgets, EpisodeConfig, Usage
+from agentlab.contracts import Budgets, EpisodeConfig
 from agentlab.runtime.budget_guard import BudgetExceeded, BudgetGuard
 from agentlab.runtime.controlled import ControlledModelRuntime
 from agentlab.runtime.snapshot import Snapshot

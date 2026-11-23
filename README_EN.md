@@ -2,11 +2,23 @@
 
 **Post-training for code repair** · [中文](README.md)
 
-![Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x for training, 470 tests passed, MIT license.](docs/images/project-facts.svg)
+![Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x or 5.x for training, 532 tests passed, MIT license.](docs/images/project-facts.svg)
 
-CodeAgent-R evaluates **Qwen2.5-Coder-7B-Instruct** on 104 Python repair tasks. How many more programs can it fix by learning from a teacher, preference pairs, or its own successful attempts? Each checkpoint competes with the base model (Base) on dev, then the selected model is scored task by task on frozen test data.
+CodeAgent-R is a reproducible pipeline for post-training and execution-based evaluation of code repair: a frozen task pool, grading by execution, QLoRA SFT / DPO / RFT, selection on dev, and a paired comparison with the base model (Base) on frozen test data. All published experiments evaluate **Qwen2.5-Coder-7B-Instruct** on 104 self-authored repairs of single Python files. Qwen3.5-9B is supported as well. It has no results yet; smoke-test it before the first real run.
 
-[Scorecard](#method-comparison) · [Three seeds](#three-training-seeds) · [Experiment history](#experiment-history) · [Pipeline](#training-and-evaluation) · [Quick start](#run-locally)
+**The pipeline works. It has not shown a reliable gain.** On 20 frozen test tasks, Base repaired 12 and teacher-distilled SFT repaired 13. Across three training seeds the mean gain was 1.7 percentage points with a 95% interval of [0, +5], and two of the seeds selected Base on dev. No DPO round beat SFT. Test has only 20 tasks, all self-authored, which is too small to support a generalization claim.
+
+[Scorecard](#method-comparison) · [Three seeds](#three-training-seeds) · [Experiment history](#experiment-history) · [Pipeline](#training-and-evaluation) · [What keeps the results trustworthy](#what-keeps-the-results-trustworthy) · [Quick start](#run-locally)
+
+## What keeps the results trustworthy
+
+- **Grading.** A pass means the tests the reference solution ran were all executed on the candidate and all passed. Three signals must agree: exit code, the pytest summary line, and the junit XML. Exiting early, skipping tests, or collecting fewer tests is a fail.
+- **Isolation.** Candidate code runs inside a kernel Landlock sandbox. The workspace is read-only, the real HOME and /proc are unreachable, TCP connections are denied, and the process is bounded by CPU time, memory, process count, and a process-group kill on timeout. The environment is built from an allowlist. When the kernel lacks Landlock the grader falls back and records the isolation that was actually used.
+- **Statistics.** The bootstrap samples source groups, the same independent unit used for the split and the leak checks.
+- **Evidence.** `scripts/export_evidence.py` exports sanitized local artifacts to `docs/evidence/`. Once a bundle is committed, CI recomputes its conclusions from the per-task results with `scripts/verify_evidence.py`.
+- **CI.** Lint, CPU tests, evidence verification, and the privacy check, see [checks.yml](.github/workflows/checks.yml).
+
+[Findings and fixes from the latest review](docs/REVIEW-2026-11-23.md) (in Chinese)
 
 ## Method comparison
 
@@ -40,7 +52,7 @@ All three training seeds share one frozen test set. Each run selects on dev firs
 | 43 | Base | 12/20 | 0 |
 | 44 | Epoch 2 | 12/20 | 0 |
 
-The mean gain was **1.7 percentage points**. On dev, seed 42 improved three tasks and regressed on one, for a net gain of two. On test, it fixed one additional task with zero regressions. The other two runs matched the baseline score. The 95% task-bootstrap interval was **[0, +5] percentage points**. A single repair moves the score by five points on a test set of this size. [Aggregation code](scripts/aggregate_seeds.py) · [Mobile chart](docs/images/three-seed-results-mobile.png)
+The mean gain was **1.7 percentage points**. On dev, seed 42 improved three tasks and regressed on one, for a net gain of two. On test, it fixed one additional task with zero regressions. The other two runs matched the baseline score. The 95% task-bootstrap interval was **[0, +5] percentage points**. A single repair moves the score by five points on a test set of this size. That interval resamples individual tasks, which is the historical setting. The scripts now resample whole source groups by default, so recomputing it from the original results may widen it. [Aggregation code](scripts/aggregate_seeds.py) · [Mobile chart](docs/images/three-seed-results-mobile.png)
 
 ## Experiment history
 
@@ -85,14 +97,16 @@ python -m agentlab doctor
 python examples/p01_minimal.py
 ```
 
-Run the full offline suite on Linux or WSL2.
+Run the full offline suite on Linux or WSL2. It needs no GPU, model weights, or network. The kernel sandbox used for grading requires Linux 5.13 or later; older kernels fall back, and `agentlab doctor` reports what was used.
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,lint]"
 python -m pytest tests -q
+ruff check .
+python -m agentlab doctor      # the sandbox.* rows show the isolation grading actually gets
 ```
 
-GPU training and evaluation use the `.[dev,train,api]` extra. To reproduce the 64/20/20 split, set `--dev-ratio 0.20 --test-ratio 0.20` explicitly. Teacher collection sends paid requests. Use `--status-only` to inspect candidate slots first. Both guides are in Chinese. [GPU guide](docs/POSTTRAIN-GPU.md) · [Getting started](docs/START-HERE.md)
+GPU training and evaluation use the `.[dev,train,api]` extra. Newer architectures such as Qwen3.5 use `.[dev,api,train-qwen35]`; the stage script picks it from `MODEL`. To reproduce the 64/20/20 split, set `--dev-ratio 0.20 --test-ratio 0.20` explicitly. Teacher collection sends paid requests. Use `--status-only` to inspect candidate slots first. Both guides are in Chinese. [GPU guide](docs/POSTTRAIN-GPU.md) · [Getting started](docs/START-HERE.md)
 
 ## Repository and scope
 
@@ -101,16 +115,16 @@ GPU training and evaluation use the `.[dev,train,api]` extra. To reproduce the 6
 | Task specifications, public inputs, and patch grading | [benchmark](src/agentlab/benchmark/) · [contracts](src/agentlab/contracts/) |
 | SFT and DPO training, experiment stages and state | [training](src/agentlab/training/) · [experiments](src/agentlab/experiments/) · [scripts](scripts/) |
 | Workspaces, tool budgets, trajectories, and providers | [runtime](src/agentlab/runtime/) · [trajectories](src/agentlab/trajectories/) · [providers](src/agentlab/providers/) |
-| Detailed runs, preference optimization, and regression tests | [Run records](docs/EXPERIMENT-RESULTS.md) · [FEST implementation notes](docs/FEST-ANALYSIS.md) · [tests](tests/) |
+| Detailed runs, the per-group β heuristic, and regression tests | [Run records](docs/EXPERIMENT-RESULTS.md) · [Adaptive β notes](docs/ADAPTIVE-BETA.md) · [tests](tests/) |
 
-Each task replaces a single Python file. Dependencies are read-only context. The grader executes candidate code, so untrusted candidates need container isolation and resource limits. Full tool-use episodes and online RL remain future work.
+Each task replaces a single Python file. Dependencies are read-only context. Candidates are model-generated code, so grading runs them inside a [Landlock sandbox](src/agentlab/runtime/isolation.py) by default. A container backend is not implemented. Adversarial code inside the pytest process can still forge its own output; use containers when that boundary matters. Full tool-use episodes and online RL remain future work.
 
-Public reports share aggregate metrics and public model revisions. Teacher credentials, private tests, per-task outputs, raw logs, and checkpoints stay local. [Sharing results](docs/START-HERE.md#分享实验结果)
+Public reports share aggregate metrics and public model revisions. Teacher credentials, private tests, raw model outputs, raw logs, and checkpoints stay local. `scripts/export_evidence.py` exports sanitized per-task verdicts and the training manifest. [Sharing results](docs/START-HERE.md#分享实验结果)
 
 ## Related work
 
 - **Code repair and execution feedback** · [SWE-Gym](https://arxiv.org/abs/2412.21139) · [FailForge](https://arxiv.org/abs/2608.08570) · [PerfCodeGen](https://arxiv.org/abs/2412.03578) · [Self-Execution Simulation](https://arxiv.org/abs/2604.03253)
 - **Self-generated data and rejection sampling** · [GiFT](https://arxiv.org/abs/2502.11466) · [RFT](https://arxiv.org/abs/2308.01825)
-- **Preferences and group feedback** · [DPO](https://arxiv.org/abs/2305.18290) · [FEST](https://arxiv.org/abs/2605.15012) · [GRPO](https://arxiv.org/abs/2402.03300)
+- **Preferences and group feedback** · [DPO](https://arxiv.org/abs/2305.18290) · [GRPO](https://arxiv.org/abs/2402.03300). Choosing β per sampling group is this project's own heuristic; see the notes for its relation to [FEST](https://arxiv.org/abs/2605.15012)
 
 CodeAgent-R is an independent implementation. Its runtime design draws on pi. [pi](https://github.com/earendil-works/pi) · [MIT license](LICENSE)

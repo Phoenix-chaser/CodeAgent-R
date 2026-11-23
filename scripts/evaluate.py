@@ -18,7 +18,6 @@ import sys
 import tempfile
 import time
 from collections import Counter, defaultdict
-from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +30,9 @@ from agentlab.benchmark.protocol import (
     spec_fingerprint,
 )
 from agentlab.benchmark.task_store import TaskStore
+from agentlab.training.hf_runtime import (
+    generate_text, load_causal_lm, load_tokenizer, prompt_inputs, resolve_revision,
+)
 from _shared_extract import extract_code
 
 
@@ -179,7 +181,6 @@ def passes_public_test(spec, code, task_dir, grade_dir):
 def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir):
     """Best-of-N sampling: try N samples, return first that passes public test,
     fallback to greedy if none pass. Ref: PerfCodeGen / Self-Execution Simulation."""
-    import torch
     from transformers import set_seed as _set_seed
     from _shared_extract import extract_code as _extract
     messages = build_messages(spec)
@@ -187,13 +188,8 @@ def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir
     # Phase 1: greedy baseline (always generated as fallback)
     inputs, attention = tokenize_prompt(tokenizer, messages, device)
     _set_seed(args.seed)
-    with torch.inference_mode():
-        output = model.generate(inputs, attention_mask=attention,
-                                max_new_tokens=args.max_new_tokens,
-                                do_sample=False,
-                                pad_token_id=tokenizer.pad_token_id)
-    greedy_raw = tokenizer.decode(output[0][inputs.shape[1]:],
-                                  skip_special_tokens=True)
+    greedy_raw, _ = generate_text(model, tokenizer, inputs, attention,
+                                  max_new_tokens=args.max_new_tokens, do_sample=False)
     greedy_code = _extract(greedy_raw)
 
     # Phase 2: if greedy passes public test, return it (saves sampling time)
@@ -206,15 +202,9 @@ def generate_best_of_n(model, tokenizer, spec, args, device, task_dir, grade_dir
     for trial in range(args.best_of_n):
         _set_seed(args.seed + 10000 + trial)
         inputs, attention = tokenize_prompt(tokenizer, messages, device)
-        with torch.inference_mode():
-            output = model.generate(inputs, attention_mask=attention,
-                                    max_new_tokens=args.max_new_tokens,
-                                    do_sample=True,
-                                    temperature=args.sample_temperature,
-                                    top_p=1.0,
-                                    pad_token_id=tokenizer.pad_token_id)
-        raw = tokenizer.decode(output[0][inputs.shape[1]:],
-                               skip_special_tokens=True)
+        raw, _ = generate_text(model, tokenizer, inputs, attention,
+                               max_new_tokens=args.max_new_tokens, do_sample=True,
+                               temperature=args.sample_temperature)
         code = _extract(raw)
         trial_dir = grade_dir / f"bon-{trial}-{spec['task_id']}"
         trial_dir.mkdir(exist_ok=True)
@@ -235,22 +225,12 @@ def error_record(spec, repeat_index, seed, error):
 
 def tokenize_prompt(tokenizer, messages, device):
     """Normalize legacy tensor and current BatchEncoding chat-template outputs."""
-    import torch
-    encoded = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True, return_tensors="pt")
-    if isinstance(encoded, Mapping):
-        inputs = encoded["input_ids"].to(device)
-        attention = encoded.get("attention_mask")
-        attention = attention.to(device) if attention is not None else torch.ones_like(inputs)
-    else:
-        inputs = encoded.to(device)
-        attention = torch.ones_like(inputs)
-    return inputs, attention
+    return prompt_inputs(tokenizer, messages, device)
 
 
 def evaluate_gpu(args, specs, task_dir, grade_dir):
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, set_seed
+    from transformers import set_seed
 
     if args.adapter and not Path(args.adapter).is_dir():
         raise FileNotFoundError(
@@ -267,23 +247,13 @@ def evaluate_gpu(args, specs, task_dir, grade_dir):
             training_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if training_manifest.get("model") != args.model:
                 raise ValueError("Adapter was trained against a different base model")
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.adapter or args.model, revision=None if args.adapter else args.revision,
-        trust_remote_code=False)
+    tokenizer = load_tokenizer(args.adapter or args.model,
+                               None if args.adapter else args.revision)
     if training_manifest:
         template_hash = hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest()
         if template_hash != training_manifest.get("chat_template_sha256"):
             raise ValueError("Adapter tokenizer chat template differs from training")
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model_kwargs = dict(revision=args.revision, device_map={"": 0},
-                        torch_dtype=torch.bfloat16, trust_remote_code=False,
-                        attn_implementation="sdpa")
-    if args.quantization == "nf4":
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
+    model = load_causal_lm(args.model, args.revision, args.quantization)
     revision = getattr(model.config, "_commit_hash", None) or args.revision
     if training_manifest and training_manifest.get("resolved_revision") != revision:
         raise ValueError("Evaluation base revision differs from adapter training revision")
@@ -315,22 +285,16 @@ def evaluate_gpu(args, specs, task_dir, grade_dir):
                 else:
                     inputs, attention = tokenize_prompt(
                         tokenizer, build_messages(spec), model.device)
-                    generation = dict(max_new_tokens=args.max_new_tokens,
-                                      do_sample=args.temperature > 0,
-                                      pad_token_id=tokenizer.pad_token_id)
-                    if args.temperature > 0:
-                        generation.update(temperature=args.temperature, top_p=1.0, top_k=0)
-                    with torch.inference_mode():
-                        output = model.generate(inputs, attention_mask=attention,
-                                                **generation)
+                    raw, output_tokens = generate_text(
+                        model, tokenizer, inputs, attention,
+                        max_new_tokens=args.max_new_tokens, do_sample=args.temperature > 0,
+                        temperature=args.temperature, top_k=0)
                     torch.cuda.synchronize()
-                    generated = output[0][inputs.shape[1]:]
-                    raw = tokenizer.decode(generated, skip_special_tokens=True)
                     record = evaluate_candidate(spec, raw, task_dir, grade_dir, dict(
                         repeat_index=repeat_index, seed=seed,
                         generation_time_s=round(time.perf_counter() - started, 4),
-                        input_tokens=inputs.shape[1], output_tokens=len(generated),
-                        hit_token_limit=len(generated) >= args.max_new_tokens))
+                        input_tokens=inputs.shape[1], output_tokens=output_tokens,
+                        hit_token_limit=output_tokens >= args.max_new_tokens))
             except Exception as error:
                 record = error_record(spec, repeat_index, seed, error)
             results.append(record)
@@ -431,6 +395,9 @@ def main():
     args = parser.parse_args()
     if args.repeats < 1 or args.max_new_tokens < 1 or args.temperature < 0:
         parser.error("repeats/max-new-tokens must be positive; temperature cannot be negative")
+    if args.model:
+        # 未指定 revision 时用该模型已核对的固定版本，并如实记入 requested_revision
+        args.revision = resolve_revision(args.model, args.revision)
     if args.api and args.adapter:
         parser.error("API evaluation cannot load a local adapter")
     specs = load_specs(args.tasks_file, split=args.split)

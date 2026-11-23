@@ -22,6 +22,30 @@ current_update:
   rft:
     dev_passed_by_round: [14, 16]
     test_passed_by_round: [13, 11]
+  bootstrap_note: 已发表的区间按题重采样；脚本现默认按来源组整簇重采样，尚未用原始结果重算
+review_2026_11_23:
+  date: '2026-11-23'
+  record: docs/REVIEW-2026-11-23.md
+  offline_tests: 532 passed
+  test_seconds: 60.2
+  command: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider
+  lint: ruff check . 通过
+  grader:
+    pass_rule: 退出码、pytest 汇总行与 junit 用例集合一致，且等于参考解执行到的测试集合
+    gaming_candidates_rejected: 5    # 修复前均判 strict_pass
+    pool_export_under_new_grader: {reference_passes: 104, bugs_reproduced: 104}
+  isolation:
+    primary: kernel Landlock（Linux 5.13+），工作区只读、HOME 与 /proc 不可读、TCP 拒绝
+    fallback: rlimit + 清洁环境 + 进程组清理，文件系统与网络不受限，判分详情如实记录
+    container_backend: not_implemented
+  evidence:
+    export: scripts/export_evidence.py
+    verify: scripts/verify_evidence.py
+    bundles_published: 0
+  ci: .github/workflows/checks.yml
+  supported_models: [Qwen/Qwen2.5-Coder-7B-Instruct, Qwen/Qwen3.5-9B]
+  gpu_validation_this_round: not_run
+  environment: Linux / Python 3.14.4 / torch 2.14.1+cpu / transformers 5.22.1 / Landlock ABI 8
 historical_84_task_pilot:
   scope: 早期 60/12/12 划分及其数据重验记录
   reported_run:

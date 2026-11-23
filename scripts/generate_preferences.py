@@ -1,9 +1,10 @@
 """Build DPO preference pairs: teacher success (chosen) vs student failure.
 
 Hard-negative selection via AST-fingerprint clustering and group-solvable
-statistics inspired by:
-- FEST: Few-Shot Demonstration-Guided RLVR (https://arxiv.org/abs/2605.15012)
+statistics. Both rules are this project's own heuristics; related work:
 - DPO: Direct Preference Optimization (https://arxiv.org/abs/2305.18290)
+- FEST: Few-Shot Demonstration-Guided RLVR (https://arxiv.org/abs/2605.15012),
+  which also labels tasks by whether the model can solve them
 
 Runs an SFT adapter (or the base model) on frozen train tasks, grades every
 sample with the three-layer grader, and pairs each strict-fail generation with
@@ -15,7 +16,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 import tempfile
 import time
@@ -28,9 +28,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from agentlab.benchmark.builder import build_all
 from agentlab.benchmark.protocol import build_messages, load_specs, protocol_hash
-from agentlab.benchmark.task_store import TaskStore
+from agentlab.models import DEFAULT_MODEL
+from agentlab.training.hf_runtime import (
+    generate_text, load_causal_lm, load_tokenizer, prompt_inputs, resolve_revision,
+)
 from evaluate import evaluate_candidate
-from collect_data import grade_candidate
 
 
 def teacher_solutions(candidates_file: str, specs: list[dict]) -> dict[str, list[str]]:
@@ -57,7 +59,7 @@ def main() -> None:
                         help="Teacher candidates JSONL for the same split")
     parser.add_argument("--adapter", default=None,
                         help="SFT adapter path; omit to sample the base model")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--revision", default=None)
     parser.add_argument("--samples", type=int, default=4,
                         help="Student generations per task")
@@ -71,6 +73,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.samples < 1 or args.temperature < 0:
         parser.error("samples must be >= 1 and temperature >= 0")
+    args.revision = resolve_revision(args.model, args.revision)
 
     specs = load_specs(args.tasks_file, args.split)
     teachers = teacher_solutions(args.candidates_file, specs)
@@ -79,9 +82,7 @@ def main() -> None:
         parser.error(f"{len(missing)} tasks lack strict-pass teacher answers: "
                      f"{missing[:5]}")
 
-    import torch
-    from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                              BitsAndBytesConfig, set_seed)
+    from transformers import set_seed
 
     output = Path(args.output)
     if output.exists():
@@ -95,19 +96,9 @@ def main() -> None:
         "max_new_tokens": args.max_new_tokens, "quantization": args.quantization,
         "teacher_candidates": str(Path(args.candidates_file).resolve()),
     }
-    model_kwargs = dict(revision=args.revision, device_map={"": 0},
-                        torch_dtype=torch.bfloat16, trust_remote_code=False,
-                        attn_implementation="sdpa")
-    if args.quantization == "nf4":
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.adapter or args.model, revision=None if args.adapter else args.revision,
-        trust_remote_code=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
+    tokenizer = load_tokenizer(args.adapter or args.model,
+                               None if args.adapter else args.revision)
+    model = load_causal_lm(args.model, args.revision, args.quantization)
     resolved = getattr(model.config, "_commit_hash", None) or args.revision
     if args.adapter:
         from peft import PeftModel
@@ -129,24 +120,16 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="dpo-pref-") as temporary:
         work = Path(temporary)
         build_all(work / "tasks", specs)
-        store = TaskStore(work / "tasks")
         for position, spec in enumerate(specs, 1):
             messages = build_messages(spec)
             group = []
             for sample_index in range(args.samples):
                 set_seed(args.seed + position * 1000 + sample_index)
-                inputs = tokenizer.apply_chat_template(
-                    messages, tokenize=True, add_generation_prompt=True,
-                    return_tensors="pt").to(model.device)
-                generation = dict(max_new_tokens=args.max_new_tokens,
-                                  do_sample=args.temperature > 0,
-                                  pad_token_id=tokenizer.pad_token_id)
-                if args.temperature > 0:
-                    generation.update(temperature=args.temperature, top_p=1.0)
-                with torch.inference_mode():
-                    out = model.generate(inputs, **generation)
-                raw = tokenizer.decode(out[0][inputs.shape[1]:],
-                                       skip_special_tokens=True)
+                inputs, attention = prompt_inputs(tokenizer, messages, model.device)
+                raw, _ = generate_text(
+                    model, tokenizer, inputs, attention,
+                    max_new_tokens=args.max_new_tokens, do_sample=args.temperature > 0,
+                    temperature=args.temperature)
                 grade_dir = work / f"grade-{spec['task_id']}-{sample_index}"
                 grade_dir.mkdir()
                 record = evaluate_candidate(spec, raw, work / "tasks", grade_dir,
@@ -156,7 +139,7 @@ def main() -> None:
                 group.append({"record": record, "verdict": verdict,
                               "generated_code": record["generated_code"],
                               "fingerprint": _ast_fingerprint(record["generated_code"])})
-            # 群组统计（FEST 自适应 β 的数据来源）
+            # 群组统计（按组自适应 β 的数据来源，本项目启发式）
             pass_count = sum(g["record"]["strict_pass"] for g in group)
             group_solvable = pass_count > 0
             group_pass_rate = pass_count / len(group)

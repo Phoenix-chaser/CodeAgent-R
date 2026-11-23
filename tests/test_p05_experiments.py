@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """P05 验收：Mock 记录驱动的报表管线口径（对照 devkit VALIDATION 前向试用数值）。"""
 import json
-from pathlib import Path
 
 import pytest
 

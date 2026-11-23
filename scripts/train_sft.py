@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from agentlab.models import DEFAULT_MODEL
 from agentlab.training.hf_sft import train
 
 
@@ -16,8 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SFT：Qwen + 单卡 QLoRA，严格 assistant-only mask")
     parser.add_argument("--data", required=True, help="JSONL train split；strict_pass=true")
     parser.add_argument("--eval-data", default=None, help="独立 JSONL dev split；真实训练必需")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
-    parser.add_argument("--revision", default=None, help="基座模型 commit/revision")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--revision", default=None,
+                        help="基座模型 commit/revision；默认用该模型已核对的固定版本")
     parser.add_argument("--output", default="checkpoints/sft-v2")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -39,7 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dry-run", action="store_true", help="只审计数据，不加载模型")
     parser.add_argument("--save-every-epoch", action=argparse.BooleanOptionalAction,
                         default=True, help="保留各 epoch adapter，供独立 dev 执行评测选择（默认开启）")
-    parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing", action="store_false", default=True)
+    parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing",
+                        action="store_false", default=True)
     return parser
 
 

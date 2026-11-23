@@ -52,10 +52,7 @@ class Snapshot:
             .encode()).hexdigest()[:16]
         dest = store / sid
         if dest.exists():
-            meta = json.loads((dest / "snapshot.json").read_text(encoding="utf-8"))
-            if meta["workspace_manifest_hash"] != manifest:
-                raise ContractError(f"snapshot id collision or corruption: {sid}")
-            return cls(meta, dest)
+            return cls._load_existing(dest, sid, manifest)
         tmp = store / f".tmp-{sid}-{time.time_ns()}"
         tmp.mkdir()
         try:
@@ -89,9 +86,9 @@ class Snapshot:
                 shutil.rmtree(tmp, ignore_errors=True)
         return cls(meta, dest)
 
-    @staticmethod
-    def _load_existing(dest: Path, sid: str, manifest: str,
-                       prefix_hash: str) -> "Snapshot":
+    @classmethod
+    def _load_existing(cls, dest: Path, sid: str, manifest: str) -> "Snapshot":
+        """同一内容再次创建时复用已有快照；manifest 不一致说明 id 碰撞或存储损坏。"""
         meta = json.loads((dest / "snapshot.json").read_text(encoding="utf-8"))
         if meta["workspace_manifest_hash"] != manifest:
             raise ContractError(

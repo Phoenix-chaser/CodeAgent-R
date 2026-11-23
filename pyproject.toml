@@ -14,9 +14,18 @@ agentlab = "agentlab.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "torch>=2.0"]
 api = ["openai>=1.0"]
+lint = ["ruff>=0.9"]
 train = [
     "torch>=2.4,<3",
     "transformers>=4.46,<5",
+    "peft>=0.13,<1",
+    "accelerate>=1,<2",
+    "bitsandbytes>=0.44,<1",
+]
+# Qwen3.5 及更新的架构：模型代码从 transformers 5.2.0 才开始有
+train-qwen35 = [
+    "torch>=2.4,<3",
+    "transformers>=5.2,<6",
     "peft>=0.13,<1",
     "accelerate>=1,<2",
     "bitsandbytes>=0.44,<1",
@@ -28,3 +37,22 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# 只启用能发现错误的规则：未使用或未定义的名字、可疑写法、行宽。
+# 导入排序等纯风格规则不强制，避免与实验逻辑无关的大面积改动。
+select = ["E", "F", "W", "B"]
+# zip() 的长度一致性由各调用点自己保证；显式 strict 会改变现有行为
+ignore = ["B905"]
+
+[tool.ruff.lint.per-file-ignores]
+# 脚本和测试先设置 sys.path 再导入项目模块，导入不在文件顶部是有意为之
+"scripts/*" = ["E402"]
+"tests/*" = ["E402"]
+# 题目夹具里的长代码行是数据，不折行
+"src/agentlab/benchmark/builder.py" = ["E402", "E501"]
+"src/agentlab/benchmark/pilot_tasks.py" = ["E501"]

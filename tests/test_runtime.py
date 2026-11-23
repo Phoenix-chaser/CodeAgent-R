@@ -20,7 +20,7 @@ from agentlab.contracts import (
     Budgets, ContractError, EpisodeConfig, PublicTask, Usage,
 )
 from agentlab.runtime import (
-    BudgetExceeded, BudgetGuard, MockRuntime, MockStep, Snapshot,
+    BudgetGuard, MockRuntime, MockStep, Snapshot,
     UnsupportedSandbox, Workspace, detect_backends, require_backend,
 )
 
@@ -127,7 +127,8 @@ def test_concurrent_admission_no_double_spend(tmp_path):
     def worker(n):
         results.append(guard.try_reserve(f"r{n}", "model_requests", 4))
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
-    [t.start() for t in threads]; [t.join() for t in threads]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
     # 4(已结) + 4(预留) + 4(新) = 12 > 10 → 恰好一个成功
     assert sorted(results) == [False, True]
     assert guard.ledger.reserved["model_requests"] == 4
@@ -200,7 +201,7 @@ def test_attempt_restart_keeps_budget_no_result_resubmit(tmp_path):
     guard = BudgetGuard("epR", task.budgets)
     rt = MockRuntime()
     # attempt 1：花 1 次模型请求
-    out1 = rt.run(task, make_episode("epR", attempt=1), ws, guard,
+    rt.run(task, make_episode("epR", attempt=1), ws, guard,
                   steps=[MockStep(kind="model_request")])
     assert guard.ledger.spent["model_requests"] == 1
     # attempt 2：同一 guard 继续（不清零）
@@ -214,11 +215,14 @@ def test_attempt_restart_keeps_budget_no_result_resubmit(tmp_path):
 
 # ── 沙箱显式 unsupported ─────────────────────────────────
 def test_container_unsupported_explicit():
+    from agentlab.runtime.isolation import probe_landlock
     backends = detect_backends()
-    if not backends["container"].available:
-        with pytest.raises(UnsupportedSandbox):
-            require_backend("container")               # 不静默回退
+    # 容器后端尚未实现：即使装了 docker/podman 也不报告为可用
+    assert backends["container"].available is False
+    with pytest.raises(UnsupportedSandbox):
+        require_backend("container")               # 不静默回退
     assert backends["process"].available
+    assert backends["landlock"].available is probe_landlock().available
 
 
 def test_settlement_releases_original_reservation():

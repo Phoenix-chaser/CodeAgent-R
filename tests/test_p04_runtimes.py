@@ -2,12 +2,11 @@
 """P04 验收：fake executable 契约全套 + 受控运行器分支一致性 + pi 拒绝未核实能力。"""
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
-from agentlab.contracts import Budgets, EpisodeConfig, Usage
+from agentlab.contracts import Budgets, EpisodeConfig
 from agentlab.runtime import Workspace
 from agentlab.runtime.budget_guard import BudgetExceeded, BudgetGuard
 from agentlab.runtime.controlled import ControlledModelRuntime
@@ -89,8 +88,9 @@ def test_timeout_cancel(tmp_path):
 
 # ── 统一工具语义 ──────────────────────────────────────────
 def make_ws(tmp_path):
-    import tarfile, io
-    src = tmp_path / "fsrc"; (src / "pkg").mkdir(parents=True)
+    import tarfile
+    src = tmp_path / "fsrc"
+    (src / "pkg").mkdir(parents=True)
     (src / "pkg" / "m.py").write_text("def f(n):\n    return n + 1\n", encoding="utf-8")
     tar = tmp_path / "f.tar"
     with tarfile.open(tar, "w") as t:
@@ -146,7 +146,7 @@ def test_controlled_two_candidates_same_state(tmp_path):
 
     outcomes = {}
     for name, fn in (("A", candidate_a), ("B", candidate_b)):
-        branch_ws = snap.restore(tmp_path / f"ws" / f"branch{name}")
+        branch_ws = snap.restore(tmp_path / "ws" / f"branch{name}")
         ep = EpisodeConfig(episode_id="epC", task_id="t",
                            budgets=Budgets(max_model_requests=10))
         guard = BudgetGuard("epC", ep.budgets)

@@ -5,7 +5,7 @@ import math
 import pytest
 
 from agentlab.rl import (
-    AdvantageResult, GRPOStepResult, RLConfig, RLRunner,
+    RLConfig, RLRunner,
     RolloutGroup, RolloutTrajectory, compute_group_advantage, grpo_step,
 )
 

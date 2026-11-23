@@ -59,6 +59,21 @@ def test_frozen_split_must_match_requested_seed(tmp_path):
         validate_split(tmp_path, None, 43)
 
 
+def test_frozen_split_is_checked_against_the_requested_ratios(tmp_path):
+    """0.20 / 0.20 is the documented 64/20/20 split; it must not be rejected as stale."""
+    tasks = [{"task_id": "case", "split": "train"}]
+    (tmp_path / "tasks.jsonl").write_text(json.dumps(tasks[0]))
+    manifest = {"tasks_sha256": content_hash(tasks), "seed": 42,
+                "dev_ratio": 0.2, "test_ratio": 0.2}
+    (tmp_path / "split-manifest.json").write_text(json.dumps(manifest))
+    validate_split(tmp_path, None, 42, 0.20, 0.20)
+    validate_split(tmp_path, None, 42, 0.2, 0.2)
+    with pytest.raises(ValueError, match="split configuration differs"):
+        validate_split(tmp_path, None, 42)                      # 请求的是默认的 0.15
+    with pytest.raises(ValueError, match="split configuration differs"):
+        validate_split(tmp_path, None, 42, 0.20, 0.15)
+
+
 def test_incomplete_frozen_audit_is_rejected(tmp_path):
     tasks = [{"task_id": "case", "split": "train"}]
     (tmp_path / "tasks.jsonl").write_text(json.dumps(tasks[0]))
@@ -73,7 +88,10 @@ def test_incomplete_frozen_audit_is_rejected(tmp_path):
 def runner(tmp_path):
     if os.name == "nt" or not shutil.which("bash"):
         pytest.skip("The GPU runner targets Linux Bash")
-    for relative in ("scripts/run_experiment_v2.sh", "src/agentlab/experiments/run_state.py"):
+    # run_state.py resolves the model's pinned revision through agentlab.models,
+    # which is standard-library only, so those two files travel with it
+    for relative in ("scripts/run_experiment_v2.sh", "src/agentlab/experiments/run_state.py",
+                     "src/agentlab/models.py", "src/agentlab/__init__.py"):
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, destination)
@@ -167,6 +185,23 @@ def test_configuration_change_gets_separate_state_and_checkpoint(runner, setting
     assert invoke("train", **setting).returncode == 0
     assert len(trace()) == 4
     assert len(list(root.glob("checkpoints/*/adapter"))) == 2
+
+
+def test_model_and_revision_are_resolved_as_a_pair(runner):
+    """Switching the model must not keep the previous model's pinned revision."""
+    root, _, invoke, trace = runner
+    assert invoke("train", MODEL="Qwen/Qwen3.5-9B").returncode == 0
+    command = trace()[0]
+    assert command[command.index("--model") + 1] == "Qwen/Qwen3.5-9B"
+    assert command[command.index("--revision") + 1] == "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+    result = invoke("train", MODEL="some-org/some-model")
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = trace()[2]
+    assert command[command.index("--revision") + 1] == ""
+    assert "没有已核对的固定 revision" in result.stderr
+    assert invoke("train", MODEL="Qwen/Qwen3.5-9B", MODEL_REVISION="deadbeef").returncode == 0
+    command = trace()[4]
+    assert command[command.index("--revision") + 1] == "deadbeef"
 
 
 def test_changed_training_data_cannot_silently_reuse_existing_adapter(runner):

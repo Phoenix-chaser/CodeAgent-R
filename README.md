@@ -2,11 +2,23 @@
 
 **代码修复模型的后训练与执行评测** · [English](README_EN.md)
 
-![Python 3.10+、PyTorch NF4 QLoRA、训练使用 Transformers 4.x、470 项测试通过、MIT 许可证。](docs/images/project-facts.svg)
+![Python 3.10+、PyTorch NF4 QLoRA、训练使用 Transformers 4.x 或 5.x、532 项测试通过、MIT 许可证。](docs/images/project-facts.svg)
 
-CodeAgent-R 在 104 道 Python 修复题上评测 **Qwen2.5-Coder-7B-Instruct**。教师蒸馏、偏好优化和拒绝采样各能多修好几道题？候选修复要运行测试，各轮 checkpoint 要在 dev 上与基座模型（Base）比较，最后在冻结的 test 上逐题计分。
+CodeAgent-R 是一套可复现的代码修复后训练与评测流水线：冻结任务池、执行判分、QLoRA SFT / DPO / RFT、在 dev 上选型、在冻结的 test 上与基座模型（Base）配对比较。已发表的实验全部在 104 道自写的 Python 单文件修复题上评测 **Qwen2.5-Coder-7B-Instruct**。另支持 Qwen3.5-9B，它还没有实验结果，首次运行前先做冒烟测试。
 
-[方法对比](#方法对比) · [三种子](#三种子复现) · [实验演进](#实验演进) · [评测流程](#训练与评测流程) · [快速开始](#本地快速开始)
+**结论：流程跑通了，但没有测出可靠的提升。** 20 道冻结 test 题上，Base 修好 12 道，教师蒸馏 SFT 修好 13 道。三个训练种子的平均增益是 1.7 个百分点，95% 区间为 [0, +5]，其中两个种子在 dev 上选回了 Base。三轮 DPO 都没有超过 SFT。test 只有 20 道题，而且全部是自写题目，这个规模不支持泛化结论。
+
+[方法对比](#方法对比) · [三种子](#三种子复现) · [实验演进](#实验演进) · [评测流程](#训练与评测流程) · [结果如何保证可信](#结果如何保证可信) · [快速开始](#本地快速开始)
+
+## 结果如何保证可信
+
+- **判分**：通过意味着参考解跑出的那批测试，在候选上全部执行并且全部通过。退出码、pytest 汇总行和 junit XML 三处证据必须一致。提前退出、跳过用例、让收集到的用例变少，都判为不通过。
+- **隔离**：候选代码在内核 Landlock 沙箱里运行。工作区只读，真实 HOME 与 /proc 不可读，TCP 连接被拒绝，并受 CPU 时间、内存、进程数和进程组超时清理的约束；环境变量按白名单构造。内核不支持时降级运行，并把实际生效的隔离写进判分详情。
+- **统计**：bootstrap 以来源组为抽样单位，与任务划分、泄漏检查使用同一个独立单位。
+- **证据**：`scripts/export_evidence.py` 把本地产物脱敏后导出到 `docs/evidence/`。证据包提交后，CI 用 `scripts/verify_evidence.py` 从逐题结果重算结论。
+- **CI**：lint、CPU 测试、证据复核和隐私检查，见 [checks.yml](.github/workflows/checks.yml)。
+
+[本轮复审发现的问题与修复记录](docs/REVIEW-2026-11-23.md)
 
 ## 方法对比
 
@@ -40,7 +52,7 @@ CodeAgent-R 在 104 道 Python 修复题上评测 **Qwen2.5-Coder-7B-Instruct**�
 | 43 | Base | 12/20 | 0 |
 | 44 | epoch 2 | 12/20 | 0 |
 
-平均提升 **1.7 个百分点**。seed 42 在 dev 上有 3 题改善、1 题退化，净多通过 2 题。在 test 上有 1 题改善、0 题退化，其余两次运行的 test 总分持平。按题重采样的 95% 区间为 **[0, +5] 个百分点**。每道题占 5 个百分点，解读平均增益时需要同时看分母和区间。[统计实现](scripts/aggregate_seeds.py) · [手机竖版图](docs/images/three-seed-results-mobile.png)
+平均提升 **1.7 个百分点**。seed 42 在 dev 上有 3 题改善、1 题退化，净多通过 2 题。在 test 上有 1 题改善、0 题退化，其余两次运行的 test 总分持平。按题重采样的 95% 区间为 **[0, +5] 个百分点**。每道题占 5 个百分点，解读平均增益时需要同时看分母和区间。这个区间是按题重采样的历史口径；当前脚本默认按来源组整簇重采样，用原始结果重算后区间可能变宽。[统计实现](scripts/aggregate_seeds.py) · [手机竖版图](docs/images/three-seed-results-mobile.png)
 
 ## 实验演进
 
@@ -85,14 +97,16 @@ python -m agentlab doctor
 python examples/p01_minimal.py
 ```
 
-完整离线测试可在 Linux 或 WSL2 上运行。
+完整离线测试可在 Linux 或 WSL2 上运行，不需要 GPU、模型权重或网络。判分使用的内核沙箱需要 Linux 5.13 及以上；不满足时自动降级，`agentlab doctor` 会报告实际情况。
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,lint]"
 python -m pytest tests -q
+ruff check .
+python -m agentlab doctor      # sandbox.* 几行说明判分实际使用的隔离
 ```
 
-GPU 训练与评测使用 `.[dev,train,api]`。复现 64/20/20 划分时，显式设 `--dev-ratio 0.20 --test-ratio 0.20`。教师采集会发送付费请求，先用 `--status-only` 检查候选槽位。[GPU 实验手册](docs/POSTTRAIN-GPU.md) · [上手指南](docs/START-HERE.md)
+GPU 训练与评测使用 `.[dev,train,api]`。Qwen3.5 等新架构使用 `.[dev,api,train-qwen35]`，阶段脚本按 `MODEL` 自动选择。复现 64/20/20 划分时，显式设 `--dev-ratio 0.20 --test-ratio 0.20`。教师采集会发送付费请求，先用 `--status-only` 检查候选槽位。[GPU 实验手册](docs/POSTTRAIN-GPU.md) · [上手指南](docs/START-HERE.md)
 
 ## 项目结构与边界
 
@@ -101,16 +115,16 @@ GPU 训练与评测使用 `.[dev,train,api]`。复现 64/20/20 划分时，显�
 | 任务规格、公开输入、补丁判分 | [benchmark](src/agentlab/benchmark/) · [contracts](src/agentlab/contracts/) |
 | SFT / DPO 训练、实验编排与状态 | [training](src/agentlab/training/) · [experiments](src/agentlab/experiments/) · [scripts](scripts/) |
 | 工作区、工具预算、轨迹与模型服务 | [runtime](src/agentlab/runtime/) · [trajectories](src/agentlab/trajectories/) · [providers](src/agentlab/providers/) |
-| 实验明细、偏好优化与回归测试 | [实验成绩单](docs/EXPERIMENT-RESULTS.md) · [FEST 实现笔记](docs/FEST-ANALYSIS.md) · [tests](tests/) |
+| 实验明细、按组自适应 β 与回归测试 | [实验成绩单](docs/EXPERIMENT-RESULTS.md) · [自适应 β 实现笔记](docs/ADAPTIVE-BETA.md) · [tests](tests/) |
 
-每个任务只替换一个 Python 主文件，依赖文件为只读上下文。判分会执行候选代码，运行不受信任的候选需要容器与资源隔离。完整工具交互和在线 RL 仍属后续工作。
+每个任务只替换一个 Python 主文件，依赖文件为只读上下文。候选是模型生成的代码，所以判分默认在 [Landlock 沙箱](src/agentlab/runtime/isolation.py)里执行；容器后端尚未实现。同一个 pytest 进程内的对抗性代码仍可能伪造输出，需要更强的边界时应使用容器。完整工具交互和在线 RL 仍属后续工作。
 
-公开报告使用汇总指标与公开模型版本。教师密钥、私有测试、逐题输出、原始日志和 checkpoint 留在本地。[分享实验结果](docs/START-HERE.md#分享实验结果)
+公开报告使用汇总指标与公开模型版本。教师密钥、私有测试、逐题输出的原文、原始日志和 checkpoint 留在本地；`scripts/export_evidence.py` 可以导出脱敏后的逐题判定与训练 manifest。[分享实验结果](docs/START-HERE.md#分享实验结果)
 
 ## 相关研究
 
 - **代码修复与执行反馈**　[SWE-Gym](https://arxiv.org/abs/2412.21139) · [FailForge](https://arxiv.org/abs/2608.08570) · [PerfCodeGen](https://arxiv.org/abs/2412.03578) · [Self-Execution Simulation](https://arxiv.org/abs/2604.03253)
 - **自生成数据与拒绝采样**　[GiFT](https://arxiv.org/abs/2502.11466) · [RFT](https://arxiv.org/abs/2308.01825)
-- **偏好优化与组内反馈**　[DPO](https://arxiv.org/abs/2305.18290) · [FEST](https://arxiv.org/abs/2605.15012) · [GRPO](https://arxiv.org/abs/2402.03300)
+- **偏好优化与组内反馈**　[DPO](https://arxiv.org/abs/2305.18290) · [GRPO](https://arxiv.org/abs/2402.03300)；按组自适应 β 是本项目自己的启发式，与 [FEST](https://arxiv.org/abs/2605.15012) 的关系见实现笔记
 
 项目独立实现，运行时设计受 pi 启发。[pi](https://github.com/earendil-works/pi) · [MIT 许可证](LICENSE)

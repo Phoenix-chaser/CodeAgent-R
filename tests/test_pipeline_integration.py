@@ -6,7 +6,6 @@
 """
 import difflib
 import subprocess
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,6 @@ from agentlab.benchmark.task_store import TaskStore
 from agentlab.runtime.workspace import Workspace
 
 import sys
-from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 from _shared_extract import extract_code
 

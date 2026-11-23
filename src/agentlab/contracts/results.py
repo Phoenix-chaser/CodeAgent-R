@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import field_validator, model_validator
+from pydantic import model_validator
 
 from agentlab.contracts.events import Usage
 from agentlab.contracts.versioning import ContractError, VersionedModel

@@ -39,6 +39,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from agentlab.benchmark.builder import build_all
 from agentlab.benchmark.protocol import build_messages, load_specs, protocol_hash
+from agentlab.models import DEFAULT_MODEL
+from agentlab.training.hf_runtime import (
+    generate_text, load_causal_lm, load_tokenizer, prompt_inputs, resolve_revision,
+)
 from evaluate import evaluate_candidate
 
 
@@ -64,7 +68,7 @@ def make_hint(spec: dict, failures: list[dict]) -> str:
         tail = functional.get("private_tail") or functional.get("public_tail") or ""
         if tail:
             # 提取最后几行有意义的错误信息
-            lines = [l.strip() for l in tail.splitlines() if l.strip()]
+            lines = [raw.strip() for raw in tail.splitlines() if raw.strip()]
             if lines:
                 parts.append("最后一次失败详情：" + " | ".join(lines[-2:]))
             break
@@ -77,7 +81,7 @@ def main() -> None:
     parser.add_argument("--split", default="train", choices=["train", "dev"])
     parser.add_argument("--adapter", default=None,
                         help="SFT adapter path; omit for base model")
-    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--revision", default=None)
     parser.add_argument("--samples", type=int, default=8,
                         help="Phase 1: samples per task for standard RFT")
@@ -91,6 +95,7 @@ def main() -> None:
     parser.add_argument("--quantization", choices=["nf4", "bf16"], default="nf4")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
+    args.revision = resolve_revision(args.model, args.revision)
 
     specs = load_specs(args.tasks_file, args.split)
     output = Path(args.output)
@@ -98,23 +103,11 @@ def main() -> None:
         parser.error("output exists; use a new path")
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    import torch
-    from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                              BitsAndBytesConfig, set_seed)
+    from transformers import set_seed
 
-    model_kwargs = dict(revision=args.revision, device_map={"": 0},
-                        torch_dtype=torch.bfloat16, trust_remote_code=False,
-                        attn_implementation="sdpa")
-    if args.quantization == "nf4":
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True, bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.adapter or args.model, revision=None if args.adapter else args.revision,
-        trust_remote_code=False)
-    if tokenizer.pad_token_id is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(args.model, **model_kwargs)
+    tokenizer = load_tokenizer(args.adapter or args.model,
+                               None if args.adapter else args.revision)
+    model = load_causal_lm(args.model, args.revision, args.quantization)
     if args.adapter:
         from peft import PeftModel
         model = PeftModel.from_pretrained(model, args.adapter, is_trainable=False)
@@ -123,16 +116,11 @@ def main() -> None:
 
     def generate(messages, temp, seed_offset):
         set_seed(args.seed + seed_offset)
-        inputs = tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_tensors="pt").to(model.device)
-        gen = dict(max_new_tokens=args.max_new_tokens,
-                   do_sample=temp > 0, pad_token_id=tokenizer.pad_token_id)
-        if temp > 0:
-            gen.update(temperature=temp, top_p=1.0)
-        with torch.inference_mode():
-            out = model.generate(inputs, **gen)
-        return tokenizer.decode(out[0][inputs.shape[1]:], skip_special_tokens=True)
+        inputs, attention = prompt_inputs(tokenizer, messages, model.device)
+        raw, _ = generate_text(model, tokenizer, inputs, attention,
+                               max_new_tokens=args.max_new_tokens,
+                               do_sample=temp > 0, temperature=temp)
+        return raw
 
     samples = []
     stats = Counter()

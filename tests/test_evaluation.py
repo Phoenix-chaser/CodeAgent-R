@@ -165,6 +165,46 @@ def test_paired_intervals_are_reproducible_and_respect_pairing():
     assert upper - lower > 0.4
 
 
+def test_paired_bootstrap_resamples_whole_source_groups():
+    # 四个来源组、每组两题，组内两题同涨同跌
+    base = [0, 0, 1, 1, 0, 0, 1, 1]
+    treat = [0.5] * 8
+    groups = ["g1", "g1", "g2", "g2", "g3", "g3", "g4", "g4"]
+    clustered = paired_bootstrap(base, treat, samples=4000, seed=42, groups=groups)
+    by_task = paired_bootstrap(base, treat, samples=4000, seed=42)
+    assert clustered == (-0.5, 0.5)        # 整簇抽取：组内相关性被保留
+    assert by_task == (-0.375, 0.375)      # 按题重采样把同组两题当成独立观测，区间偏窄
+    with pytest.raises(ValueError):
+        paired_bootstrap(base, treat, groups=groups[:-1])
+
+
+def test_report_bootstraps_by_source_group_when_recorded():
+    baseline, treatment = report_fixture(), report_fixture()
+    treatment["adapter"] = "checkpoints/epoch-001/adapter"
+    treatment["results"][1]["strict_pass"] = True
+    for report in (baseline, treatment):
+        for record in report["results"]:
+            record["source_group"] = "same-group"
+    report = make_report(baseline, treatment, bootstrap_samples=400)
+    assert "按来源组聚类重采样的配对 bootstrap 95% 区间: [+50.00, +50.00] 个百分点" in report
+    assert "1 个来源组）" in report                 # 同组的两题总是一起被抽中
+    assert "bootstrap 以来源组为抽样单位" in report
+    historical = make_report(baseline, treatment, bootstrap_samples=400, cluster_by="task")
+    assert "按任务配对 bootstrap 95% 区间: [+0.00, +100.00] 个百分点" in historical
+
+
+def test_report_falls_back_to_tasks_when_source_groups_are_missing():
+    baseline, treatment = report_fixture(), report_fixture()
+    treatment["adapter"] = "checkpoints/epoch-001/adapter"
+    for record in baseline["results"]:
+        record["source_group"] = "g"
+    report = make_report(baseline, treatment, bootstrap_samples=100)
+    assert "缺少一致的 source_group，按任务重采样" in report
+    assert "按任务配对 bootstrap 95% 区间" in report
+    with pytest.raises(ValueError):
+        make_report(baseline, treatment, cluster_by="repository")
+
+
 def test_training_overlap_detects_source_groups_and_manifest(tmp_path):
     spec = SPECS[0]
     training = tmp_path / "train.jsonl"

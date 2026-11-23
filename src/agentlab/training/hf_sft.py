@@ -26,6 +26,11 @@ from typing import Any, Iterable, Iterator
 import torch
 from torch.utils.data import DataLoader, Dataset
 
+from agentlab.training.hf_runtime import (
+    apply_chat_template, assert_model_supported, load_causal_lm, load_tokenizer,
+    lora_targets_for, resolve_revision,
+)
+
 
 def _as_list(ids: Any) -> list[int]:
     """Convert tokenizer output (list/tensor/nested list) into token ids."""
@@ -108,7 +113,9 @@ class SFTDataset(Dataset):
     A response is obtained by tokenizing the *complete* conversation and
     subtracting the tokenizer's own ``add_generation_prompt`` prefix.  This
     means the end-of-turn token is whatever the model template emits; no model
-    specific token id is hard-coded here.
+    specific token id is hard-coded here.  Thinking mode is disabled through
+    ``hf_runtime.apply_chat_template`` so that the generation prompt and the
+    rendered target start with the same tokens.
     """
 
     def __init__(self, data_path: str | Path, tokenizer: Any,
@@ -141,12 +148,10 @@ class SFTDataset(Dataset):
         return messages, target
 
     def _tokenize(self, messages: list[dict], target: dict) -> tuple[list[int], list[int]]:
-        prefix = _as_list(self.tokenizer.apply_chat_template(
-            messages, tokenize=True, add_generation_prompt=True,
-            return_tensors=None))
-        full = _as_list(self.tokenizer.apply_chat_template(
-            messages + [target], tokenize=True, add_generation_prompt=False,
-            return_tensors=None))
+        prefix = _as_list(apply_chat_template(
+            self.tokenizer, messages, add_generation_prompt=True))
+        full = _as_list(apply_chat_template(
+            self.tokenizer, messages + [target], add_generation_prompt=False))
         if len(full) < len(prefix) or full[:len(prefix)] != prefix:
             raise ValueError(
                 "chat template prefix mismatch: complete and generation "
@@ -463,13 +468,9 @@ def train(args: Any) -> dict[str, Any]:
     if not args.dry_run and not args.eval_data:
         raise ValueError("真实训练必须提供 --eval-data（独立 dev split）")
     set_seed(args.seed)
-    from transformers import AutoTokenizer
 
-    revision = args.revision or None
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.model, revision=revision, trust_remote_code=False, padding_side="right")
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    revision = resolve_revision(args.model, args.revision)
+    tokenizer = load_tokenizer(args.model, revision, padding_side="right")
     train_data = SFTDataset(args.data, tokenizer, args.max_length, split="train")
     if not len(train_data):
         raise ValueError(f"训练集为空：{train_data.report()}")
@@ -482,6 +483,8 @@ def train(args: Any) -> dict[str, Any]:
     print(train_data.report(), flush=True)
     if dev_data:
         print(dev_data.report(), flush=True)
+    # 读完数据就核对基座架构：transformers 太旧时在下载权重之前失败
+    assert_model_supported(args.model, revision)
     if args.dry_run:
         return {"train": train_data.stats.as_dict(),
                 "dev": dev_data.stats.as_dict() if dev_data else None}
@@ -489,8 +492,7 @@ def train(args: Any) -> dict[str, Any]:
         raise RuntimeError("真实 QLoRA 训练需要 CUDA")
     if not torch.cuda.is_bf16_supported():
         raise RuntimeError("此训练配置需要支持 BF16 的 GPU，例如 24GB 单卡 GPU")
-    from transformers import (AutoModelForCausalLM, BitsAndBytesConfig,
-                              get_linear_schedule_with_warmup)
+    from transformers import get_linear_schedule_with_warmup
     from peft import (LoraConfig, get_peft_model, prepare_model_for_kbit_training)
     from peft.utils.save_and_load import (get_peft_model_state_dict, load_peft_weights,
                                          set_peft_model_state_dict)
@@ -514,16 +516,9 @@ def train(args: Any) -> dict[str, Any]:
     if torch.cuda.device_count() > 1:
         print("提示：显式使用 cuda:0，忽略其它可见 GPU", flush=True)
     torch.cuda.reset_peak_memory_stats()
-    print("加载基座模型（首次运行需下载约 15GB；NF4 量化加载约 1-3 分钟，此段无输出属正常）…",
-          flush=True)
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, revision=revision, quantization_config=bnb,
-        device_map={"": 0}, torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa", trust_remote_code=False)
+    print(f"加载基座模型 {args.model}（首次运行需下载权重；NF4 量化加载约 1-3 分钟，"
+          "此段无输出属正常）…", flush=True)
+    model = load_causal_lm(args.model, revision)
     resolved_revision = getattr(model.config, "_commit_hash", None)
     model = prepare_model_for_kbit_training(
         model, use_gradient_checkpointing=args.gradient_checkpointing,
@@ -533,10 +528,16 @@ def train(args: Any) -> dict[str, Any]:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         if hasattr(model, "enable_input_require_grads"):
             model.enable_input_require_grads()
+    # 目标按模型里真实存在的模块选择：Qwen2.5 是 7 个线性层；Qwen3.5 另有
+    # 线性注意力层的 in_proj_qkv / in_proj_z / out_proj
+    lora_targets = lora_targets_for(model)
+    if not lora_targets:
+        raise RuntimeError("no LoRA target module found in the base model")
+    targeted_modules = sum(1 for name, _ in model.named_modules()
+                           if any(name.endswith(f".{target}") for target in lora_targets))
     lora = LoraConfig(
         r=args.lora_r, lora_alpha=args.lora_alpha, lora_dropout=args.lora_dropout,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                        "gate_proj", "up_proj", "down_proj"],
+        target_modules=lora_targets,
         task_type="CAUSAL_LM")
     init_adapter = getattr(args, "init_adapter", None)
     if init_adapter:
@@ -592,6 +593,7 @@ def train(args: Any) -> dict[str, Any]:
         **initial_manifest, "status": "training", "resolved_revision": resolved_revision,
         "tokenizer_revision": getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
         "chat_template_sha256": hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
+        "lora": {"target_modules": lora_targets, "targeted_modules": targeted_modules},
         "baseline_dev": baseline_dev, "history": history, "best_epoch": 0,
         "best_dev_loss": best_loss, "optimizer_steps": 0,
         "checkpoint_index": "checkpoint-index.json",
@@ -659,7 +661,8 @@ def train(args: Any) -> dict[str, Any]:
                           f"({global_step * 100 // total_steps}%) "
                           f"loss={entry['loss']:.4f} lr={entry['lr']:.2e} · "
                           f"已用 {elapsed / 60:.1f}m · 剩余≈{remaining / 60:.1f}m", flush=True)
-            dev_metrics = evaluate_loss(model, dev_loader, device) if dev_loader else {"loss": float("inf"), "tokens": 0}
+            dev_metrics = (evaluate_loss(model, dev_loader, device) if dev_loader
+                           else {"loss": float("inf"), "tokens": 0})
             epoch_entry = {
                 "epoch": epoch, "train_loss": epoch_loss_sum / epoch_tokens if epoch_tokens else float("inf"),
                 "dev_loss": dev_metrics["loss"], "dev_tokens": dev_metrics["tokens"],
@@ -721,6 +724,7 @@ def train(args: Any) -> dict[str, Any]:
         "resolved_revision": resolved_revision,
         "tokenizer_revision": getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
         "chat_template_sha256": hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
+        "lora": {"target_modules": lora_targets, "targeted_modules": targeted_modules},
         "configuration": config, "configuration_sha256": config_hash,
         "implementation_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "seed": args.seed, "data": train_data.stats.as_dict(),

@@ -8,7 +8,7 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 STAGE="${1:-all}"
 FORCE="${FORCE:-0}"
 MODEL="${MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}"
-MODEL_REVISION="${MODEL_REVISION:-c03e6d358207e414f1eca0bb1891e29f1db0e242}"
+MODEL_REVISION="${MODEL_REVISION:-}"
 DEV_RATIO="${DEV_RATIO:-0.15}"
 TEST_RATIO="${TEST_RATIO:-0.15}"
 TRAIN_CANDIDATES="${TRAIN_CANDIDATES:-12}"
@@ -23,6 +23,12 @@ pyrun() {
   if command -v python >/dev/null 2>&1; then python "$@"; else python3 "$@"; fi
 }
 state() { pyrun src/agentlab/experiments/run_state.py "$@"; }
+# revision 与模型成对：换了模型却沿用旧 revision，会按旧模型的提交去拉取新模型
+if [[ -z "$MODEL_REVISION" ]]; then
+  MODEL_REVISION="$(state revision "$MODEL")"
+  export MODEL_REVISION
+  [[ -n "$MODEL_REVISION" ]] || echo "警告：$MODEL 没有已核对的固定 revision，将使用 main；复现实验请显式设置 MODEL_REVISION。" >&2
+fi
 paths="$(state init)"
 IFS=$'\t' read -r RUN_ID STATE_DIR EXP_DIR CKPT_DIR SFT_DIR EVAL_OUTPUT_DIR TRAIN_CANDIDATES_FILE DEV_CANDIDATES_FILE <<< "$paths"
 POOL_DIR="$STATE_DIR/pools"
@@ -60,7 +66,12 @@ artifacts() {
       INPUTS+=(scripts/export_pilot_tasks.py scripts/export_tasks_v2.py src/agentlab/benchmark)
       OUTPUTS=("$POOL_DIR/combined.jsonl") ;;
     split)
-      INPUTS+=("$POOL_DIR/combined.jsonl" scripts/prepare_data.py src/agentlab/training/preparation.py)
+      # 划分比例不进入 run_id（已有状态目录继续有效），但要参与 split 阶段的回执校验：
+      # 改了比例不能静默复用按旧比例冻结的划分
+      printf 'seed=%s\ndev_ratio=%s\ntest_ratio=%s\n' "$SEED" "$DEV_RATIO" "$TEST_RATIO" \
+        > "$STATE_DIR/split-request.txt"
+      INPUTS+=("$STATE_DIR/split-request.txt" "$POOL_DIR/combined.jsonl" scripts/prepare_data.py
+               src/agentlab/training/preparation.py)
       OUTPUTS=("$EXP_DIR/tasks.jsonl" "$EXP_DIR/split-manifest.json" "$EXP_DIR/audit-manifest.json") ;;
     collect)
       INPUTS+=("$EXP_DIR/tasks.jsonl" scripts/collect_data.py src/agentlab/benchmark)
@@ -118,12 +129,24 @@ PY
 }
 
 stage_deps() {
-  pyrun -m pip install -e '.[dev,train,api]'
+  local extra
+  extra="$(state install-extra "$MODEL")"     # train（Qwen2.5）| train-qwen35（Qwen3.5）
+  pyrun -m pip install -e ".[dev,${extra},api]"
   pyrun -m pip check
   pyrun -c 'import torch, transformers, peft, bitsandbytes, accelerate, openai; print("训练依赖导入成功")'
 }
 
 stage_env() {
+  # 下载权重之前先确认架构受支持（Qwen3.5 需要 transformers >= 5.2.0）
+  pyrun - "$MODEL" "$MODEL_REVISION" <<'PY'
+import sys
+sys.path.insert(0, "src")
+from agentlab.training import hf_runtime
+hf_runtime.assert_model_supported(sys.argv[1], sys.argv[2] or None)
+print(f"模型架构检查通过: {sys.argv[1]} @ {sys.argv[2] or 'main'}")
+PY
+  # 判分隔离的实际情况：landlock 不可用时候选代码只在 rlimit + 清洁环境下运行
+  pyrun -m agentlab doctor | grep -E '^sandbox\.' || true
   pyrun - <<'PY'
 import torch
 assert torch.cuda.is_available(), 'CUDA 不可用：检查驱动/环境'
@@ -154,7 +177,8 @@ stage_pools() {
 
 stage_split() {
   if [[ -f "$EXP_DIR/tasks.jsonl" && -f "$EXP_DIR/split-manifest.json" && -f "$EXP_DIR/audit-manifest.json" ]]; then
-    state validate-split --directory "$EXP_DIR" --pool "$POOL_DIR/combined.jsonl" --seed "$SEED"
+    state validate-split --directory "$EXP_DIR" --pool "$POOL_DIR/combined.jsonl" \
+      --seed "$SEED" --dev-ratio "$DEV_RATIO" --test-ratio "$TEST_RATIO"
     echo "已核对冻结任务与当前池一致：$EXP_DIR"
     return 0
   fi

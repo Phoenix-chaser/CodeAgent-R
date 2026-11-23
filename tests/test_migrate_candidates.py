@@ -69,7 +69,7 @@ def test_migrates_only_hash_matching_records(frozen):
     assert report["remaining_slots"] == 2 * 12 - 2
     assert report["skipped"] == {"not_strict_pass": 1, "task_hash_mismatch": 1,
                                  "split_mismatch": 1}
-    lines = [json.loads(l) for l in (tmp_path / "new.jsonl").read_text().splitlines()]
+    lines = [json.loads(line) for line in (tmp_path / "new.jsonl").read_text().splitlines()]
     assert {r["candidate_idx"] for r in lines} == {0, 1}
     manifest = json.loads((tmp_path / "new.manifest.json").read_text())
     assert manifest["protocol"]["split"] == "train"

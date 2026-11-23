@@ -181,7 +181,8 @@ def test_event_dedup_key_rule():
                       event_type="episode_start", timestamp="t", seq=1)
     e3 = RuntimeEvent(episode_id="ep-1", attempt=2, source="runtime",
                       event_type="episode_start", timestamp="t", seq=1)
-    key = lambda e: (e.episode_id, e.attempt, e.seq)
+    def key(event):
+        return (event.episode_id, event.attempt, event.seq)
     assert key(e1) == key(e2)      # 重放 → 同键，可去重
     assert key(e1) != key(e3)      # 重试 → 新 attempt，永不等同
     assert e1.event_id is None     # 未提供 event_id 时保持 None，不合成

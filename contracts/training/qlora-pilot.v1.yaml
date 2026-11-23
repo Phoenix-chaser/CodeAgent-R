@@ -5,6 +5,8 @@ lora:
   r: 16
   alpha: 32
   dropout: 0.05
+  # Qwen2.5 的线性层。训练代码按模型里真实存在的模块选择；
+  # Qwen3.5 另有线性注意力层的 in_proj_qkv / in_proj_z / out_proj
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 optimizer:
   lr: 1.0e-4

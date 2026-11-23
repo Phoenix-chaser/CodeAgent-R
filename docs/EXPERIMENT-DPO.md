@@ -1,6 +1,6 @@
 # DPO 的三轮 dev 实验
 
-[实验成绩单](EXPERIMENT-RESULTS.md) · [FEST 实现笔记](FEST-ANALYSIS.md)
+[实验成绩单](EXPERIMENT-RESULTS.md) · [按组自适应 β 笔记](ADAPTIVE-BETA.md)
 
 DPO 从已选中的 SFT adapter 继续训练。参照线是同一批 20 道 dev 题上的 Base（10/20）和 SFT（12/20）。三轮 DPO 分别通过 11、11 和 10 题，均未超过 SFT，选型流程因此保留 SFT，三轮都没有 test 分数。
 
@@ -20,4 +20,4 @@ DPO 从已选中的 SFT adapter 继续训练。参照线是同一批 20 道 dev 
 
 `reward_margin` 衡量 policy 相对 reference 对两个答案的偏好差。两者在初始化时完全相同，margin 就为 0，此时损失对该 margin 的导数为 −0.5。仅凭接近零的 margin 或接近 log 2 的 loss，无法判定模型参数梯度消失。[损失函数](../src/agentlab/dpo/loss.py)
 
-就执行结果而言，第 2 轮调整 β 后仍通过 11 题。第 3 轮的偏好损失下降，dev 修复数却减至 10。若继续研究负样本选择，可在固定 reference、预算和 dev 题目的前提下比较配对策略。[FEST 实现笔记](FEST-ANALYSIS.md)
+就执行结果而言，第 2 轮调整 β 后仍通过 11 题。第 3 轮的偏好损失下降，dev 修复数却减至 10。若继续研究负样本选择，可在固定 reference、预算和 dev 题目的前提下比较配对策略。[按组自适应 β 笔记](ADAPTIVE-BETA.md)

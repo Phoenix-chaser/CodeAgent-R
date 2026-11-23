@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import difflib
-import io
 import tarfile
 from pathlib import Path
 
@@ -155,7 +154,7 @@ def build_all(output_dir: Path, specs: list[dict] | None = None) -> list[Path]:
         canary = f"CANARY-{hashlib.sha256(spec['task_id'].encode()).hexdigest()[:12]}"
         public = {key: spec[key] for key in
                   ("task_id", "source_group", "split", "bug_family", "difficulty", "instruction")}
-        public.update(task_version=1, allowed_paths=["*.py"],
+        public.update(task_version=1, allowed_paths=[spec["module"]],
                       protected_paths=["tests_public/**", "run_public_tests.sh"],
                       public_check_profile="pytest:tests_public")
         (td / "public.yaml").write_text(

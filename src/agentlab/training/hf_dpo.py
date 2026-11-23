@@ -1,17 +1,20 @@
 # -*- coding: utf-8 -*-
 """Real single-GPU DPO trainer refining an existing SFT adapter.
 
-Adaptive β and group-solvable masking inspired by:
-- FEST: Few-Shot Demonstration-Guided RLVR (https://arxiv.org/abs/2605.15012)
-- DPO: Direct Preference Optimization (https://arxiv.org/abs/2305.18290)
-
 Design decisions (mirroring hf_sft.py where possible):
 - policy  = base model (NF4) + SFT adapter loaded with is_trainable=True;
-- reference = the SAME SFT adapter, frozen and eval-only — DPO refines the
-  SFT checkpoint rather than restarting from base;
+- reference = the Base model by default (standard DPO), or the adapter named by
+  --reference-adapter; either way it is frozen and eval-only;
+- per-pair β chosen from the sampling group's outcome (pair_objectives) is this
+  project's own heuristic. It is not a method from any cited paper;
 - preference targets use the exact chat-template prefix subtraction, so
   chosen and rejected share a byte-identical supervised prefix boundary;
 - per-epoch immutable checkpoints reuse save_epoch_checkpoint / manifests.
+
+Related work: DPO (https://arxiv.org/abs/2305.18290). FEST
+(https://arxiv.org/abs/2605.15012) is few-shot-guided RLVR; it also groups
+tasks by whether the model can solve them, which is where the group_solvable
+label comes from, but it does not propose a per-group β.
 """
 from __future__ import annotations
 
@@ -19,7 +22,6 @@ import hashlib
 import json
 import math
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,18 +29,19 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from agentlab.dpo.loss import dpo_loss, sequence_logp
+from agentlab.training.hf_runtime import (
+    apply_chat_template, load_causal_lm, load_tokenizer, resolve_revision,
+)
 from agentlab.training.hf_sft import (
-    DatasetAudit, _as_list, environment_manifest, set_seed,
+    DatasetAudit, _as_list, environment_manifest, parameter_delta, set_seed,
 )
 
 
 def _target_only(tokenizer: Any, messages: list[dict], target: dict) -> tuple[list[int], list[int]]:
     """Tokenize prompt+target once; labels supervise only the target tokens."""
-    prefix = _as_list(tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=True, return_tensors=None))
-    full = _as_list(tokenizer.apply_chat_template(
-        messages + [target], tokenize=True, add_generation_prompt=False,
-        return_tensors=None))
+    prefix = _as_list(apply_chat_template(tokenizer, messages, add_generation_prompt=True))
+    full = _as_list(apply_chat_template(
+        tokenizer, messages + [target], add_generation_prompt=False))
     if len(full) < len(prefix) or full[:len(prefix)] != prefix:
         raise ValueError("chat template prefix mismatch for preference target")
     return full, [-100] * len(prefix) + full[len(prefix):]
@@ -93,8 +96,8 @@ class DPODataset(Dataset):
             if max(len(ids_c), len(ids_r)) > self.max_length:
                 self.stats.skipped_long += 1
                 continue
-            if sum(l != -100 for l in labels_c) == 0 or \
-                    sum(l != -100 for l in labels_r) == 0:
+            if sum(label != -100 for label in labels_c) == 0 or \
+                    sum(label != -100 for label in labels_r) == 0:
                 self.stats.skipped_invalid += 1
                 continue
             self.stats.record_hashes.add(record_hash)
@@ -102,8 +105,8 @@ class DPODataset(Dataset):
             self.stats.source_groups.add(str(record.get("source_group", "")))
             self.stats.loaded += 1
             self.stats.total_tokens += len(ids_c) + len(ids_r)
-            self.stats.supervised_tokens += (sum(l != -100 for l in labels_c)
-                                             + sum(l != -100 for l in labels_r))
+            self.stats.supervised_tokens += (sum(label != -100 for label in labels_c)
+                                             + sum(label != -100 for label in labels_r))
             self.samples.append({
                 "input_ids_chosen": ids_c, "labels_chosen": labels_c,
                 "input_ids_rejected": ids_r, "labels_rejected": labels_r,
@@ -164,8 +167,10 @@ def _logp_batch(model: torch.nn.Module, input_ids: torch.Tensor,
                 labels: torch.Tensor, attention: torch.Tensor,
                 device: torch.device, autocast: bool) -> torch.Tensor:
     """Sum supervised-token log prob per row of the batch."""
-    context = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-               if autocast else torch.enable_grad())
+    # autocast 参数目前不起作用：原实现创建了 autocast 上下文却没有进入，等于从未
+    # 开启。为不改变已记录的 DPO 轮次的数值，这里保持该行为（bnb 量化层自带计算
+    # 精度，其余层按权重 dtype 运行）。
+    del autocast
     outputs = model(input_ids=input_ids.to(device),
                     attention_mask=attention.to(device))
     logits = outputs.logits.float()
@@ -180,6 +185,60 @@ def _capture_lora_state(model: Any) -> dict:
             for name, parameter in model.named_parameters() if parameter.requires_grad}
 
 
+def pair_objectives(logp_chosen: torch.Tensor, logp_rejected: torch.Tensor,
+                    ref_chosen: torch.Tensor, ref_rejected: torch.Tensor,
+                    betas: list[float]) -> dict[str, torch.Tensor]:
+    """One DPO loss per preference pair (each with its own β), averaged over the batch."""
+    if not (len(betas) == logp_chosen.shape[0] == logp_rejected.shape[0]
+            == ref_chosen.shape[0] == ref_rejected.shape[0]):
+        raise ValueError("one β and one log-probability per preference pair are required")
+    terms = [dpo_loss(logp_chosen[i:i + 1], logp_rejected[i:i + 1],
+                      ref_chosen[i:i + 1], ref_rejected[i:i + 1], beta=beta)
+             for i, beta in enumerate(betas)]
+    return {
+        "loss": torch.stack([term["loss"] for term in terms]).mean(),
+        "preference_accuracy": torch.stack(
+            [term["sigmoid_delta"].reshape(()) for term in terms]).gt(0.5).float().mean(),
+        "reward_margin": torch.stack(
+            [term["reward_margin"].reshape(()) for term in terms]).mean(),
+    }
+
+
+def dpo_step(policy: torch.nn.Module, reference: torch.nn.Module,
+             batch: dict[str, torch.Tensor], betas: list[float], *, optimizer,
+             device: torch.device, max_grad_norm: float = 1.0,
+             autocast: bool = True) -> dict[str, float]:
+    """在一个 batch 的偏好对上做一次 optimizer step，返回写日志用的指标。
+
+    reference 只参与前向，不产生梯度。训练循环本身需要 CUDA，这里把每一步
+    单独拆出来，是为了能在 CPU 上验证。
+    """
+    optimizer.zero_grad(set_to_none=True)
+    with torch.no_grad():
+        ref_c = _logp_batch(reference, batch["input_ids_chosen"],
+                            batch["labels_chosen"], batch["attention_chosen"],
+                            device, autocast)
+        ref_r = _logp_batch(reference, batch["input_ids_rejected"],
+                            batch["labels_rejected"], batch["attention_rejected"],
+                            device, autocast)
+    pol_c = _logp_batch(policy, batch["input_ids_chosen"], batch["labels_chosen"],
+                        batch["attention_chosen"], device, autocast)
+    pol_r = _logp_batch(policy, batch["input_ids_rejected"], batch["labels_rejected"],
+                        batch["attention_rejected"], device, autocast)
+    metrics = pair_objectives(pol_c, pol_r, ref_c, ref_r, betas)
+    loss = metrics["loss"]
+    if not torch.isfinite(loss):
+        raise FloatingPointError("DPO loss is not finite")
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(
+        [p for p in policy.parameters() if p.requires_grad],
+        max_grad_norm, error_if_nonfinite=True)
+    optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    return {"loss": float(loss.detach()), "reward_margin": float(metrics["reward_margin"]),
+            "preference_accuracy": float(metrics["preference_accuracy"])}
+
+
 def train_dpo(args: Any) -> dict[str, Any]:
     """Run DPO refinement of an SFT adapter. Requires CUDA + bf16."""
     for name in ("beta", "lr"):
@@ -191,13 +250,9 @@ def train_dpo(args: Any) -> dict[str, Any]:
     if not getattr(args, "sft_adapter", None):
         raise ValueError("DPO refines an SFT adapter: --sft-adapter is required")
     set_seed(args.seed)
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-    revision = args.revision or None
-    tokenizer = AutoTokenizer.from_pretrained(
-        args.sft_adapter, trust_remote_code=False, padding_side="right")
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    revision = resolve_revision(args.model, args.revision)
+    tokenizer = load_tokenizer(args.sft_adapter, padding_side="right")
     data = DPODataset(args.data, tokenizer, args.max_length, split="train")
     if not len(data):
         raise ValueError(f"preference set is empty: {data.report()}")
@@ -215,10 +270,6 @@ def train_dpo(args: Any) -> dict[str, Any]:
         raise ValueError("output directory must be empty; use a new --output")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    bnb = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True)
-
     def load_frozen_reference() -> torch.nn.Module:
         """Reference = Base model (no adapter), per standard DPO.
 
@@ -228,10 +279,7 @@ def train_dpo(args: Any) -> dict[str, Any]:
         Using SFT as reference (policy ≡ reference at init) yields
         σ→0 vanishing gradients when rejected comes from the same SFT.
         """
-        model = AutoModelForCausalLM.from_pretrained(
-            args.model, revision=revision, quantization_config=bnb,
-            device_map={"": 0}, torch_dtype=torch.bfloat16,
-            attn_implementation="sdpa", trust_remote_code=False)
+        model = load_causal_lm(args.model, revision)
         if args.reference_adapter:
             model = PeftModel.from_pretrained(
                 model, args.reference_adapter, is_trainable=False)
@@ -240,10 +288,7 @@ def train_dpo(args: Any) -> dict[str, Any]:
         return model
 
     reference = load_frozen_reference()
-    policy_base = AutoModelForCausalLM.from_pretrained(
-        args.model, revision=revision, quantization_config=bnb,
-        device_map={"": 0}, torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa", trust_remote_code=False)
+    policy_base = load_causal_lm(args.model, revision)
     from peft import prepare_model_for_kbit_training
     policy_base = prepare_model_for_kbit_training(
         policy_base, use_gradient_checkpointing=True,
@@ -288,7 +333,8 @@ def train_dpo(args: Any) -> dict[str, Any]:
     }
     (output_dir / "run-config.json").write_text(
         json.dumps(initial, ensure_ascii=False, indent=2), encoding="utf-8")
-    print("reference/policy 均为 NF4 + SFT adapter（policy 可训练）", flush=True)
+    print(f"reference: NF4 Base{' + ' + args.reference_adapter if args.reference_adapter else ''}"
+          "（冻结）; policy: NF4 Base + SFT adapter（可训练）", flush=True)
 
     from agentlab.training.hf_sft import (save_epoch_checkpoint,
                                            write_checkpoint_index)
@@ -303,73 +349,24 @@ def train_dpo(args: Any) -> dict[str, Any]:
             loss_sum = acc_sum = margin_sum = 0.0
             batches = 0
             for batch in loader:
-                optimizer.zero_grad(set_to_none=True)
-                with torch.no_grad():
-                    ref_c = _logp_batch(reference, batch["input_ids_chosen"],
-                                        batch["labels_chosen"],
-                                        batch["attention_chosen"], device, True)
-                    ref_r = _logp_batch(reference, batch["input_ids_rejected"],
-                                        batch["labels_rejected"],
-                                        batch["attention_rejected"], device, True)
-                pol_c = _logp_batch(policy, batch["input_ids_chosen"],
-                                    batch["labels_chosen"],
-                                    batch["attention_chosen"], device, True)
-                pol_r = _logp_batch(policy, batch["input_ids_rejected"],
-                                    batch["labels_rejected"],
-                                    batch["attention_rejected"], device, True)
-                # FEST 自适应 β：不可解任务用 β₁（强），可解任务用 β₂（弱）
-                solvable_mask = batch.get("group_solvable")
-                if solvable_mask is not None and hasattr(args, "beta_solvable"):
-                    per_pair_beta = torch.where(
-                        solvable_mask.to(device) == 1,
-                        torch.tensor(args.beta_solvable, device=device),
-                        torch.tensor(args.beta_unsolvable, device=device))
-                else:
-                    per_pair_beta = torch.full((pol_c.shape[0],), args.beta,
-                                               device=device)
-                # 对 batch 内每对独立计算 DPO loss（per-pair β）
-                loss_terms = []
-                for i in range(pol_c.shape[0]):
-                    pair_metrics = dpo_loss(pol_c[i:i+1], pol_r[i:i+1],
-                                            ref_c[i:i+1], ref_r[i:i+1],
-                                            beta=float(per_pair_beta[i]))
-                    loss_terms.append(pair_metrics["loss"])
-                sigmoid_deltas = torch.stack([
-                    dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
-                             ref_r[i:i+1], beta=float(per_pair_beta[i])
-                             )["sigmoid_delta"].squeeze()
-                    for i in range(pol_c.shape[0])]).to(device)
-                reward_margins = torch.stack([
-                    dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
-                             ref_r[i:i+1], beta=float(per_pair_beta[i])
-                             )["reward_margin"].squeeze()
-                    for i in range(pol_c.shape[0])]).to(device)
-                loss = torch.stack(
-                    [dpo_loss(pol_c[i:i+1], pol_r[i:i+1], ref_c[i:i+1],
-                              ref_r[i:i+1], beta=float(per_pair_beta[i])
-                              )["loss"] for i in range(pol_c.shape[0])]).mean()
-                if not torch.isfinite(loss):
-                    raise FloatingPointError("DPO loss is not finite")
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    [p for p in policy.parameters() if p.requires_grad],
-                    args.max_grad_norm, error_if_nonfinite=True)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
+                # 按组自适应 β（本项目启发式）：整组采样都失败的题用 β_unsolvable，
+                # 学生能解但这次失败的题用 β_solvable
+                solvable = batch["group_solvable"].tolist()
+                betas = ([args.beta_solvable if flag else args.beta_unsolvable
+                          for flag in solvable]
+                         if hasattr(args, "beta_solvable") else [args.beta] * len(solvable))
+                step = dpo_step(policy, reference, batch, betas, optimizer=optimizer,
+                                device=device, max_grad_norm=args.max_grad_norm)
                 global_step += 1
                 batches += 1
-                loss_sum += float(loss)
-                acc_sum += float((sigmoid_deltas > 0.5).float().mean())
-                margin_sum += float(reward_margins.mean())
+                loss_sum += step["loss"]
+                acc_sum += step["preference_accuracy"]
+                margin_sum += step["reward_margin"]
                 entry = {
-                    "step": global_step, "epoch": epoch,
-                    "loss": float(loss),
-                    "beta_mean": float(per_pair_beta.mean()),
+                    "step": global_step, "epoch": epoch, **step,
+                    "beta_mean": sum(betas) / len(betas),
                     "beta_unsolvable": args.beta_unsolvable if hasattr(args, "beta_unsolvable") else args.beta,
                     "beta_solvable": args.beta_solvable if hasattr(args, "beta_solvable") else args.beta,
-                    "reward_margin": float(reward_margins.mean()),
-                    "preference_accuracy": float(
-                        (sigmoid_deltas > 0.5).float().mean()),
                     "elapsed_s": time.time() - started,
                 }
                 log_file.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -387,16 +384,19 @@ def train_dpo(args: Any) -> dict[str, Any]:
                 json.dumps(progress, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8")
             if args.save_every_epoch:
-                from copy import deepcopy
                 snapshot = {**progress, "checkpoint_epoch": epoch,
                             "checkpoint_dev_loss": None}
                 checkpoints.append(save_epoch_checkpoint(
                     policy, tokenizer, output_dir, snapshot, epoch,
                     global_step, float("nan")))
                 write_checkpoint_index(output_dir, progress, checkpoints)
+    delta = parameter_delta(before, policy)
+    if delta["changed_parameter_tensors"] == 0:
+        print("警告：DPO 结束但没有可训练参数发生变化，请检查梯度或学习率", flush=True)
     final = {**initial, "status": "complete", "history": history,
              "optimizer_steps": global_step, "elapsed_s": time.time() - started,
-             "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30}
+             "peak_vram_gb": torch.cuda.max_memory_allocated() / 2**30,
+             "parameter_delta": delta}
     (output_dir / "training-manifest.json").write_text(
         json.dumps(final, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8")
@@ -409,4 +409,5 @@ def train_dpo(args: Any) -> dict[str, Any]:
     return final
 
 
-__all__ = ["DPODataset", "DPOCollator", "train_dpo", "_target_only"]
+__all__ = ["DPODataset", "DPOCollator", "train_dpo", "_target_only", "pair_objectives",
+           "dpo_step"]

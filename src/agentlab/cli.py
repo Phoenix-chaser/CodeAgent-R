@@ -60,6 +60,17 @@ def _probe_gpu() -> str:
         return "nvidia-smi present, probe failed"
 
 
+def _sandbox_rows() -> list[tuple[str, str]]:
+    """沙箱后端：只报告探测到的实际情况。"""
+    try:
+        from agentlab.runtime.sandbox import detect_backends
+        return [(f"sandbox.{backend.name}",
+                 f"{'available' if backend.available else 'unavailable'}: {backend.evidence}")
+                for backend in detect_backends().values()]
+    except Exception as e:  # 探测失败也如实报告
+        return [("sandbox", f"probe failed: {type(e).__name__}: {e}")]
+
+
 def doctor() -> int:
     """环境探测：只输出实际观察，不做任何能力假设。"""
     rows = [
@@ -76,6 +87,7 @@ def doctor() -> int:
         ("pi", _probe_command("pi")),
         ("node", _probe_command("node")),
         ("git", _probe_command("git")),
+        *_sandbox_rows(),
         # 以下能力在本环境无法探测，保留 unknown，不猜测
         ("model_revision", "unknown"),
         ("api_credentials", "unknown (not probed)"),

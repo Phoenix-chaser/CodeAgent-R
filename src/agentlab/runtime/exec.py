@@ -26,6 +26,15 @@ class ExecOutcome:
     stdout_truncated: bool = False
 
 
+def _decode(data: bytes | None) -> str:
+    # 被测代码可能输出非 UTF-8 字节，解码失败不应让调用方崩溃
+    return (data or b"").decode("utf-8", errors="replace")
+
+
+def _truncate(data: bytes | None) -> bytes:
+    return (data or b"")[:MAX_OUTPUT_BYTES // 2]
+
+
 def run_command(argv: list[str], cwd: Path, timeout: float,
                 env: dict | None = None) -> ExecOutcome:
     if not argv:
@@ -34,7 +43,7 @@ def run_command(argv: list[str], cwd: Path, timeout: float,
     try:
         proc = subprocess.Popen(
             argv, cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, env=env, start_new_session=True)
+            env=env, start_new_session=True)
     except OSError as e:
         return ExecOutcome(exit_status="spawn_error", returncode=None,
                            stdout="", stderr=str(e),
@@ -42,12 +51,12 @@ def run_command(argv: list[str], cwd: Path, timeout: float,
     try:
         out, err = proc.communicate(timeout=timeout)
         truncated = False
-        if len(out.encode()) > MAX_OUTPUT_BYTES:
-            out = out[:MAX_OUTPUT_BYTES // 2]
+        if len(out) > MAX_OUTPUT_BYTES:
+            out = _truncate(out)
             truncated = True
         return ExecOutcome(
             exit_status="ok" if proc.returncode == 0 else "nonzero_exit",
-            returncode=proc.returncode, stdout=out, stderr=err,
+            returncode=proc.returncode, stdout=_decode(out), stderr=_decode(err),
             duration_ms=int((time.monotonic() - start) * 1000),
             stdout_truncated=truncated)
     except subprocess.TimeoutExpired:
@@ -59,6 +68,5 @@ def run_command(argv: list[str], cwd: Path, timeout: float,
         out, err = proc.communicate()
         return ExecOutcome(
             exit_status="timeout", returncode=proc.returncode,
-            stdout=(out or "")[:MAX_OUTPUT_BYTES // 2],
-            stderr=(err or "")[:MAX_OUTPUT_BYTES // 2],
+            stdout=_decode(_truncate(out)), stderr=_decode(_truncate(err)),
             duration_ms=int((time.monotonic() - start) * 1000))

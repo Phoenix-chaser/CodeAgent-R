@@ -121,19 +121,56 @@ def wilson_interval(passed: int, total: int) -> tuple[float, float]:
     return max(0.0, center - margin), min(1.0, center + margin)
 
 
-def paired_bootstrap(base_rates: list[float], treatment_rates: list[float],
-                     samples: int = 10000, seed: int = 42) -> tuple[float, float]:
-    if len(base_rates) != len(treatment_rates) or not base_rates:
-        raise ValueError("Bootstrap requires nonempty paired task rates")
+def cluster_bootstrap_mean(values: list[float], groups: list[str] | None = None,
+                           samples: int = 10000, seed: int = 42) -> tuple[float, float]:
+    """均值的 95% bootstrap 区间。给出 groups 时按来源组整簇重采样。
+
+    划分、泄漏检查都以来源组为独立单位，同一组的两道题高度相关；按题重采样
+    会把它们当成两个独立观测，低估区间宽度。组内题数不要求相等。
+    """
+    if not values:
+        raise ValueError("Bootstrap requires nonempty values")
     if samples < 1:
         raise ValueError("bootstrap samples must be positive")
+    if groups is None:
+        clusters = [[value] for value in values]
+    else:
+        if len(groups) != len(values):
+            raise ValueError("Bootstrap requires one source group per value")
+        members: dict[str, list[float]] = {}
+        for group, value in zip(groups, values):
+            members.setdefault(group, []).append(value)
+        clusters = [members[group] for group in sorted(members)]
+    rng = random.Random(seed)
+    estimates = []
+    for _ in range(samples):
+        drawn = [rng.choice(clusters) for _ in clusters]
+        flat = [value for cluster in drawn for value in cluster]
+        estimates.append(sum(flat) / len(flat))
+    estimates.sort()
+    return estimates[int(0.025 * (samples - 1))], estimates[int(0.975 * (samples - 1))]
+
+
+def paired_bootstrap(base_rates: list[float], treatment_rates: list[float],
+                     samples: int = 10000, seed: int = 42,
+                     groups: list[str] | None = None) -> tuple[float, float]:
+    if len(base_rates) != len(treatment_rates) or not base_rates:
+        raise ValueError("Bootstrap requires nonempty paired task rates")
     differences = [treatment - baseline
                    for baseline, treatment in zip(base_rates, treatment_rates)]
-    rng = random.Random(seed)
-    count = len(differences)
-    estimates = sorted(sum(rng.choice(differences) for _ in differences) / count
-                       for _ in range(samples))
-    return estimates[int(0.025 * (samples - 1))], estimates[int(0.975 * (samples - 1))]
+    return cluster_bootstrap_mean(differences, groups, samples, seed)
+
+
+def report_source_groups(report: dict, task_ids: list[str]) -> list[str] | None:
+    """每道题的来源组（与 task_ids 对齐）；任何一题缺失时返回 None。"""
+    groups: dict[str, str] = {}
+    for record in report.get("results", []):
+        group = record.get("source_group")
+        if isinstance(group, str) and group.strip():
+            groups[record.get("task_id")] = group
+    if any(task_id not in groups for task_id in task_ids):
+        return None
+    return [groups[task_id] for task_id in task_ids]
 
 
 def format_interval(interval, percentage_points=False):
@@ -142,7 +179,10 @@ def format_interval(interval, percentage_points=False):
     return f"[{interval[0]:.2%}, {interval[1]:.2%}]"
 
 
-def make_report(base: dict, treat: dict, bootstrap_samples=10000, seed=42) -> str:
+def make_report(base: dict, treat: dict, bootstrap_samples=10000, seed=42,
+                cluster_by="source_group") -> str:
+    if cluster_by not in {"source_group", "task"}:
+        raise ValueError("cluster_by must be 'source_group' or 'task'")
     base_tasks, treat_tasks, warnings = validate_comparison(base, treat)
     base_selected = (base.get("schema_version") == treat.get("schema_version")
                      == "codeagent-eval-v2" and "adapter" in base and "adapter" in treat
@@ -155,7 +195,14 @@ def make_report(base: dict, treat: dict, bootstrap_samples=10000, seed=42) -> st
                    for task_id in task_ids]
     base_rate, treat_rate = sum(base_rates) / len(task_ids), sum(treat_rates) / len(task_ids)
     delta = treat_rate - base_rate
-    delta_ci = paired_bootstrap(base_rates, treat_rates, bootstrap_samples, seed)
+    groups = None
+    if cluster_by == "source_group":
+        base_groups = report_source_groups(base, task_ids)
+        if base_groups is None or base_groups != report_source_groups(treat, task_ids):
+            warnings.append("unverified：结果缺少一致的 source_group，按任务重采样，区间可能偏窄。")
+        else:
+            groups = base_groups
+    delta_ci = paired_bootstrap(base_rates, treat_rates, bootstrap_samples, seed, groups)
     repeats = len(base_tasks[task_ids[0]])
     base_any = sum(any(attempts.values()) for attempts in base_tasks.values())
     treat_any = sum(any(attempts.values()) for attempts in treat_tasks.values())
@@ -176,6 +223,11 @@ def make_report(base: dict, treat: dict, bootstrap_samples=10000, seed=42) -> st
     for task_id, baseline, treatment in zip(task_ids, base_rates, treat_rates):
         lines.append(f"| {task_id} | {baseline:.2%} | {treatment:.2%} | "
                      f"{(treatment - baseline) * 100:+.2f} |")
+    sampling = (f"按来源组聚类重采样的配对 bootstrap 95% 区间: {format_interval(delta_ci, True)} "
+                f"（{bootstrap_samples} 次重采样，seed={seed}，{len(set(groups))} 个来源组）。"
+                if groups else
+                f"按任务配对 bootstrap 95% 区间: {format_interval(delta_ci, True)} "
+                f"（{bootstrap_samples} 次重采样，seed={seed}）。")
     lines.extend(["", "## 汇总", "",
                   f"| 指标 | 基线 | {treatment_label} |", "|---|---|---|",
                   f"| 平均 pass@1 | {base_rate:.2%} | {treat_rate:.2%} |",
@@ -186,17 +238,23 @@ def make_report(base: dict, treat: dict, bootstrap_samples=10000, seed=42) -> st
                   f"{format_interval(wilson_interval(base_any, len(task_ids)))} | "
                   f"{format_interval(wilson_interval(treat_any, len(task_ids)))} |",
                   "", f"平均 pass@1 变化: **{delta * 100:+.2f} 个百分点**。",
-                  f"按任务配对 bootstrap 95% 区间: {format_interval(delta_ci, True)} "
-                  f"（{bootstrap_samples} 次重采样，seed={seed}）。", "",
-                  "pass@1 是每任务各次独立生成通过率的平均值；any-pass 是在全部重复中至少通过一次的任务比例，二者不能混用。",
-                  "多重复按 task_id/repeat_index 配对；bootstrap 以任务为抽样单位，保留同一任务重复间的关联。"])
+                  sampling, "",
+                  "pass@1 是每任务各次独立生成通过率的平均值；"
+                  "any-pass 是在全部重复中至少通过一次的任务比例，二者不能混用。",
+                  "多重复按 task_id/repeat_index 配对，同一任务的各次重复始终一起抽取。"
+                  + ("bootstrap 以来源组为抽样单位：同一来源组的题总是一起被抽中，保留组内题的相关性。"
+                     if groups else
+                     "bootstrap 以任务为抽样单位；来源组数很少时按题重采样会低估区间宽度。")])
     if repeats == 1:
         lines.append("本次每任务只有一次生成，因此 any-pass 与 pass@1 相同，Wilson 区间也适用于本次 pass@1。")
     if base_rates == treat_rates:
         lines.append("各任务观测通过率的配对差值均为 0，因此 bootstrap 区间退化为 [0, 0]；"
                      "这不证明总体能力等效，也不表示生成代码相同。")
     if len(task_ids) < 100:
-        lines.append(f"当前只有 {len(task_ids)} 个任务，区间仅反映这组任务的重采样波动；请扩大独立留出集并检查失败案例，不能由单个任务变化断言训练有效或无效。")
+        lines.append(f"当前只有 {len(task_ids)} 个任务"
+                     + (f"（{len(set(groups))} 个来源组）" if groups else "")
+                     + "，区间仅反映这组题的重采样波动；请扩大独立留出集并检查失败案例，"
+                       "不能由单个任务变化断言训练有效或无效。")
     if delta_ci[0] <= 0 <= delta_ci[1]:
         lines.append("差值区间包含 0，当前结果不足以证明稳定提升。")
     else:
@@ -211,10 +269,12 @@ def main():
     parser.add_argument("--output")
     parser.add_argument("--bootstrap-samples", type=int, default=10000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--cluster-by", choices=["source_group", "task"], default="source_group",
+                        help="bootstrap 抽样单位；task 仅用于复现按题重采样的历史区间")
     args = parser.parse_args()
     try:
         report = make_report(load_results(args.baseline), load_results(args.treatment),
-                             args.bootstrap_samples, args.seed)
+                             args.bootstrap_samples, args.seed, args.cluster_by)
     except (ValueError, OSError) as error:
         parser.error(str(error))
     print(report)

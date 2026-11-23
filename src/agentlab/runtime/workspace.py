@@ -101,7 +101,8 @@ class Workspace:
         with tempfile.TemporaryDirectory() as td:
             layout = Path(td)
             a, b = layout / "a", layout / "b"
-            a.mkdir(); b.mkdir()
+            a.mkdir()
+            b.mkdir()
             for item in self.root.iterdir():
                 if item.name == ".pristine":
                     continue

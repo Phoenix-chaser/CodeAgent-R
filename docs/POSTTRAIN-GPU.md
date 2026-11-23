@@ -15,6 +15,45 @@ python -m agentlab doctor
 python -c 'import torch; assert torch.cuda.is_available() and torch.cuda.is_bf16_supported()'
 ```
 
+### 判分用的沙箱
+
+候选修复是要执行的模型生成代码。判分默认在内核 Landlock 沙箱里运行它：工作区只读，真实 HOME 与 `/proc` 不可读，TCP 连接被拒绝，并受 CPU 时间、地址空间、进程数的限制和进程组超时清理约束；环境变量按白名单构造。`agentlab doctor` 输出里的 `sandbox.*` 几行说明实际生效的隔离。
+
+| `sandbox.landlock` | 判分行为 |
+| --- | --- |
+| available | 文件系统与 TCP 受内核限制 |
+| unavailable | 退回到 rlimit 加清洁环境。文件系统与网络不受限，同一用户的 `/proc/<pid>/environ` 仍可读 |
+
+以普通用户运行，root 默认被拒绝，`AGENTLAB_ALLOW_ROOT=1` 可以解除。在服务器上建议设置 `AGENTLAB_SANDBOX=required`：Landlock 不可用时直接停止，而不是降级。`AGENTLAB_SANDBOX=off` 显式关闭。
+
+已知边界：另行 `setsid` 的孙进程不受进程组清理约束；Landlock 只覆盖 TCP；同一个 pytest 进程内的对抗性代码仍可能伪造输出。需要更强的边界时应使用容器，容器后端尚未实现。[隔离实现](../src/agentlab/runtime/isolation.py)
+
+### 换用 Qwen3.5
+
+Qwen3.5 没有 Coder 专版，与 7B 最接近的档位是 Qwen3.5-9B。它与 Qwen2.5 的差别都在代码里处理，切换只需要改模型名。
+
+| 差别 | 仓库里的处理 |
+| --- | --- |
+| chat template 默认开启思考模式 | 所有调用统一走 `hf_runtime.apply_chat_template`，一律关闭。Qwen2.5 的模板没有这个开关，token 不变 |
+| 每 4 层有 3 层是线性注意力，投影名不同 | LoRA 目标按模型里真实存在的模块选择 |
+| 需要 transformers ≥ 5.2.0 | 依赖分出 `train-qwen35`；`env` 阶段在下载权重之前检查架构 |
+| revision | 未指定时用该模型已核对的固定版本。换模型不会沿用旧模型的 revision |
+
+```bash
+MODEL=Qwen/Qwen3.5-9B bash scripts/run_experiment_v2.sh deps    # 安装 .[dev,train-qwen35,api]
+MODEL=Qwen/Qwen3.5-9B bash scripts/run_experiment_v2.sh env
+```
+
+Qwen3.5 与 transformers 4.x 不兼容，建议在新的虚拟环境里安装。Qwen3.5-9B 的 BF16 权重约 18 GiB，NF4 约 8 GiB，24 GB 单卡可以完成 SFT 与评测；DPO 要同时放 reference 和 policy 两个模型，是最紧的一步。27B 和 35B-A3B 的 NF4 权重分别约 18 GiB 和 20 GiB，不适合在 24 GB 上做 QLoRA 训练。
+
+**Qwen3.5 在 GPU 上的运行尚未验证。** NF4 量化、SFT、DPO 和评测目前只做过 CPU 层面的检查：tokenizer 审计、模型结构、加载参数。先做一次几条样本的冒烟测试，再铺开：
+
+```bash
+python scripts/audit_tokenizer.py --model Qwen/Qwen3.5-9B     # thinking_disabled 应为 true
+python scripts/train_sft.py --data "$RUN/sft/train.jsonl" --eval-data "$RUN/sft/dev.jsonl" \
+  --model Qwen/Qwen3.5-9B --output checkpoints/smoke-qwen35 --epochs 1 --dry-run
+```
+
 ## 冻结任务池
 
 只做这一节时，安装 `.[dev]` 即可。用一个新的实验目录导出 `pilot` 和四批扩展任务。导出器会运行参考修复与原始缺陷的检查，合并后的任务文件含有隐藏测试和参考答案，应保留在本地。
@@ -135,10 +174,26 @@ Base 和选中模型共享同一组任务、模型版本、训练数据清单及
 )
 ```
 
-`pass@1` 在本例中是一次生成通过全部测试的任务比例。比较报告还统计逐题改善、退化和配对差值区间。多次生成中任意一次通过是另一项指标 `any_pass_rate`。多训练种子应沿用同一份冻结划分和相同的 test 题目。[跨种子汇总脚本](../scripts/aggregate_seeds.py)
+`pass@1` 在本例中是一次生成通过全部测试的任务比例。比较报告还统计逐题改善、退化和配对差值区间。差值区间默认做聚类 bootstrap，以来源组为抽样单位，与划分和泄漏检查使用同一个独立单位。`compare.py --cluster-by task` 与 `aggregate_seeds.py --cluster-by task` 复现按题重采样的历史口径。多次生成中任意一次通过是另一项指标 `any_pass_rate`。多训练种子应沿用同一份冻结划分和相同的 test 题目。[跨种子汇总脚本](../scripts/aggregate_seeds.py)
 
 ## 使用阶段脚本或分享报告
 
 [阶段脚本](../scripts/run_experiment_v2.sh)提供 `pools`、`split`、`collect`、`prepare`、`train`、`select`、`eval` 等入口。`all` 会安装依赖并在缺少候选时进入付费采集，默认流程止于 dev。锁定配置后才单独调用 `final-eval`。阶段脚本有自己的目录、缓存和默认划分，以上手动示例在自己的目录中完成。
 
 对外分享时使用汇总得分、划分规模、公开模型 revision 和方法说明。`data/`、`results/`、`checkpoints/`、`.state/` 与原始终端日志保留在本地，尤其留意 manifest 中的服务地址和绝对路径。[发布前检查](START-HERE.md#分享实验结果)
+
+## 导出可公开的证据
+
+终评完成后，把可以公开的部分整理进仓库。导出只保留判定与计数，不带走模型输出、私有测试细节、服务地址、绝对路径、硬件型号和 API key，并先按 `privacy_check.py` 的规则自查。命中任何一条都不会写出文件。
+
+```bash
+python scripts/export_evidence.py --label repair-104-seed42 \
+  --results-dir "$RESULTS" --checkpoint-dir "$CKPT" \
+  --candidates-manifest data/repair-104/train-candidates.manifest.json
+python scripts/verify_evidence.py docs/evidence/repair-104-seed42
+python scripts/privacy_check.py
+```
+
+`--candidates-manifest` 可选，它记录教师模型名；服务地址会被替换掉。
+
+`verify_evidence.py` 从逐题结果重算通过数、dev 选型和 bootstrap 区间，并核对 `selection.json` 与 `comparison.md`。README 引用了哪个数字，就把它写进证据包里的 `claims.json`，例如 `{"base_test_passed": 12, "selected_test_passed": 13}`。复核脚本逐项比对，CI 对每个已提交的证据包重复这一步。

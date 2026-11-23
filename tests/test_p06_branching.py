@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 """P06 验收：同状态分支、偏好构造、canary 隔离、lineage 可追溯。"""
-import io
 import tarfile
-from pathlib import Path
 
 import pytest
 
-from agentlab.contracts import Budgets, ContractError
-from agentlab.trajectories import BranchEngine, build_preference, prefix_hash
+from agentlab.contracts import Budgets
+from agentlab.trajectories import BranchEngine, build_preference
 from agentlab.runtime import Workspace
 
 CANARY = "CANARY-p06-labels-never-in-input"
@@ -62,8 +60,6 @@ def test_same_state_dual_branch(tmp_path):
     assert recs[0].parent_snapshot_id == recs[1].parent_snapshot_id
     # 候选消息不含工具返回（y 的纯净性）
     assert "observation" not in str(recs[0].candidate_message)
-    # 分支写入隔离：good 分支有补丁效果，bad 没有
-    good_ws = tmp_path / "rt" / "branch-cand" / "0"
     # 候选费用各自记账
     assert recs[0].candidate_cost["model_requests"] == 1
     assert recs[1].candidate_cost["model_requests"] == 1
@@ -77,7 +73,7 @@ def test_same_state_dual_branch(tmp_path):
 def test_branch_write_isolation(tmp_path):
     ws = make_ws(tmp_path)
     engine = BranchEngine(tmp_path / "rt", cont_finish)
-    recs = engine.run_group(
+    engine.run_group(
         task_id="t1", source_group="sg1", split="train",
         ws=ws, guard_seed_spent={"model_requests": 2},
         public_prefix=[{"role": "user", "text": "fix"}],

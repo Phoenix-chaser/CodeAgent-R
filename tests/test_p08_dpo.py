@@ -103,7 +103,7 @@ def test_dpo_collator():
     chosen, rejected = col.collate_pair(p)
     # x 部分全 -100
     x_len = len(chosen.input_ids) - chosen.n_target_tokens
-    assert all(l == -100 for l in chosen.labels[:x_len])
+    assert all(label == -100 for label in chosen.labels[:x_len])
     # y 部分有监督 token
     assert chosen.n_target_tokens > 0
     assert rejected.n_target_tokens > 0

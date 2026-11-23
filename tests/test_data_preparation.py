@@ -24,7 +24,9 @@ def independent_spec(index):
         "module": "rounding.py", "buggy": f"def rounded(value):\n    return int(value) + {index}\n",
         "fixed": f"def rounded(value):\n    return round(value) + {index}\n",
         "public_test": f"from rounding import rounded\ndef test_rounding():\n    assert rounded(1.9) == {index + 2}\n",
-        "private_tests": {"test_negative.py": f"from rounding import rounded\ndef test_negative():\n    assert rounded(-1.9) == {index - 2}\n"},
+        "private_tests": {"test_negative.py":
+                          "from rounding import rounded\n"
+                          f"def test_negative():\n    assert rounded(-1.9) == {index - 2}\n"},
     }
 
 

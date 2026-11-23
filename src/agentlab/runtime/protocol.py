@@ -83,7 +83,7 @@ class StreamAssembler:
         result = StreamResult(exit_status=exit_status,
                               stderr_tail=stderr[-500:])
         raw_events = [e for kind, e in self._raw if kind == "event"]
-        result.unparsed_lines = [l for kind, l in self._raw if kind == "unparsed"]
+        result.unparsed_lines = [line for kind, line in self._raw if kind == "unparsed"]
         result.dropped_duplicates = getattr(self, "_seen_dup", 0)
         # 截断判定：最后一行未以换行结束且解析失败 → truncated
         result.events = [self._emit(env) for env in raw_events]
@@ -95,10 +95,6 @@ class StreamAssembler:
             result.stream_status = (result.stream_status
                                     if result.stream_status == "truncated"
                                     else "missing_termination")
-        total_in = sum(e.usage.input_tokens or 0 for e in result.events
-                       if e.usage and e.usage.input_tokens is not None)
-        total_out = sum(e.usage.output_tokens or 0 for e in result.events
-                        if e.usage and e.usage.output_tokens is not None)
         any_usage = any(e.usage is not None for e in result.events)
         saw_model_events = any(e.event_type.startswith("model_")
                                for e in result.events)

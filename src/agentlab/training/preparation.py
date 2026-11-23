@@ -63,7 +63,8 @@ def freeze_splits(specs: list[dict], seed: int = 42,
         "task_counts": dict(Counter(spec["split"] for spec in frozen)),
         "task_ids": {split: sorted(spec["task_id"] for spec in frozen if spec["split"] == split)
                      for split in ("train", "dev", "test")},
-        "limitation": "Source groups must track original repositories/templates. AST matching does not detect all semantic duplicates.",
+        "limitation": "Source groups must track original repositories/templates. "
+                      "AST matching does not detect all semantic duplicates.",
     }
     return frozen, manifest
 

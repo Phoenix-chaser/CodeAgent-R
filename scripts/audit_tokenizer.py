@@ -12,6 +12,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from agentlab.models import DEFAULT_MODEL
+from agentlab.training.hf_runtime import (
+    apply_chat_template, load_tokenizer, resolve_revision, thinking_capable,
+)
 from agentlab.training.hf_sft import SFTDataset, _as_list
 
 
@@ -50,21 +54,25 @@ def audit_tokenizer(tokenizer, model: str, revision: str | None) -> dict:
         raise AssertionError("tokenizer audit unexpectedly dropped a probe")
     checks = []
     for sample, record in zip(dataset, records):
-        prefix = _as_list(tokenizer.apply_chat_template(
-            record["messages"], tokenize=True, add_generation_prompt=True,
-            return_tensors=None))
-        full = _as_list(tokenizer.apply_chat_template(
-            record["messages"] + [record["target"]], tokenize=True,
-            add_generation_prompt=False, return_tensors=None))
+        prefix = _as_list(apply_chat_template(
+            tokenizer, record["messages"], add_generation_prompt=True))
+        full = _as_list(apply_chat_template(
+            tokenizer, record["messages"] + [record["target"]], add_generation_prompt=False))
         labels = sample["labels"]
         if sample["input_ids"] != full or labels[:len(prefix)] != [-100] * len(prefix):
             raise AssertionError("context or token stream differs from model template")
         if labels[len(prefix):] != full[len(prefix):]:
             raise AssertionError("target mask does not cover the complete template response")
         supervised_text = tokenizer.decode(full[len(prefix):], skip_special_tokens=False)
-        if not supervised_text.startswith(record["target"]["content"]):
+        intended = record["target"]["content"]
+        # 部分模板（如 Qwen3.5）会对 assistant 内容做 trim：目标首尾的空白不进入
+        # 监督片段。训练与生成使用同一模板，所以这不影响一致性，但要如实记录。
+        trimmed = not supervised_text.startswith(intended)
+        if not (supervised_text.startswith(intended)
+                or supervised_text.startswith(intended.strip())):
             raise AssertionError("decoded target differs from the intended assistant response")
         checks.append({"name": record["sample_id"], "passed": True,
+                       "template_trims_content": trimmed,
                        "input_tokens": len(full), "masked_context_tokens": len(prefix),
                        "supervised_tokens": len(full) - len(prefix),
                        "supervised_text": supervised_text})
@@ -72,6 +80,7 @@ def audit_tokenizer(tokenizer, model: str, revision: str | None) -> dict:
         "schema_version": 1, "model": model, "requested_revision": revision,
         "transformers_version": importlib.metadata.version("transformers"),
         "tokenizer_class": type(tokenizer).__name__,
+        "thinking_disabled": thinking_capable(tokenizer),
         "chat_template_sha256": hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
         "all_passed": True, "checks": checks,
         "scope": "Tokenizer and mask validation only; no model weights or training examples exported",
@@ -80,13 +89,13 @@ def audit_tokenizer(tokenizer, model: str, revision: str | None) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="Qwen/Qwen2.5-Coder-7B-Instruct")
-    parser.add_argument("--revision", default="c03e6d358207e414f1eca0bb1891e29f1db0e242")
+    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--revision", default=None,
+                        help="基座模型 commit；默认用该模型已核对的固定版本")
     parser.add_argument("--output", default="results/tokenizer-audit.json")
     args = parser.parse_args()
-    from transformers import AutoTokenizer
-    tokenizer = AutoTokenizer.from_pretrained(args.model, revision=args.revision,
-                                             trust_remote_code=False)
+    args.revision = resolve_revision(args.model, args.revision)
+    tokenizer = load_tokenizer(args.model, args.revision)
     report = audit_tokenizer(tokenizer, args.model, args.revision)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -22,7 +22,6 @@ sys.path.insert(0, str(ROOT / "src"))
 from agentlab.benchmark.builder import SPECS
 from agentlab.benchmark.task_store import TaskStore
 from agentlab.benchmark.grader import grade
-from agentlab.runtime.workspace import Workspace
 from agentlab.benchmark.builder import build_all
 from _shared_extract import extract_code
 
@@ -95,20 +94,20 @@ def run_one_task(spec: dict, tmp_dir: Path) -> dict:
     print(f"[2/4] 补丁大小: {len(patch_text)} 字符")
 
     # 4. grader 判分
-    print(f"[3/4] grader 判分中...")
+    print("[3/4] grader 判分中...")
     result, details = grade(task, patch_file, tmp_dir / "grade")
 
     # 5. 输出
     print(f"[4/4] 结果: {result.verdict}")
     if result.verdict == "strict_pass":
-        print(f"  ✅ 修复成功！")
+        print("  ✅ 修复成功！")
     elif result.verdict == "partial":
-        print(f"  ⚠️ 部分通过（公开测试过，私有测试挂）")
+        print("  ⚠️ 部分通过（公开测试过，私有测试挂）")
     elif result.verdict == "invalid":
         print(f"  ❌ 非法修改: {details.get('layers', {}).get('legality', {})}")
     else:
         func = details.get("layers", {}).get("functional", {})
-        print(f"  ❌ 修复失败")
+        print("  ❌ 修复失败")
         if func:
             print(f"     公开测试: {'过' if func.get('public_pass') else '挂'}")
             print(f"     私有测试: {'过' if func.get('private_pass') else '挂'}")
@@ -124,7 +123,7 @@ def main():
         print("  export TEACHER_API_KEY='你的key'")
         sys.exit(1)
 
-    print(f"教师模型 真实 Episode 测试")
+    print("教师模型 真实 Episode 测试")
     print(f"API: {BASE_URL}")
     print(f"Endpoint: {BASE_URL}")
 
@@ -156,7 +155,7 @@ def main():
     out.mkdir(exist_ok=True)
     (out / "first-episode.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n结果已保存: run-logs/first-episode.json")
+    print("\n结果已保存: run-logs/first-episode.json")
 
 
 if __name__ == "__main__":

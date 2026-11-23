@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
 """沙箱后端注册表：能力显式声明，不静默回退。
 
-本机无 docker/podman（见 docs/p00-doctor.txt）→ container 后端
-available=False；请求 container 执行时抛 UnsupportedSandbox，
-绝不静默切到宿主进程执行（计划书：沙箱不可用时保留明确 unsupported）。
+后端状态只报告实际情况：
+
+- ``landlock``：内核 Landlock（runtime/isolation.py）。可用时工作区只读、
+  真实 HOME 不可读、TCP 全部拒绝；不可用时判分退化为 ``process`` 并在
+  详情里如实记录（AGENTLAB_SANDBOX=required 时改为拒绝执行）。
+- ``process``：始终可用。清洁环境 + rlimit + 进程组超时清理；没有 Landlock
+  时文件系统与网络不受限制，同用户的 /proc/<pid>/environ 仍可读。
+- ``container``：尚未实现 docker/podman 执行后端。即使本机装了容器运行时，
+  这里也报告不可用——请求它时抛 UnsupportedSandbox，绝不静默回退。
 """
 from __future__ import annotations
 
@@ -23,16 +29,29 @@ class SandboxBackend:
 
 
 def detect_backends() -> dict[str, SandboxBackend]:
+    from agentlab.runtime.isolation import probe_landlock
+
     container_cmd = next((c for c in ("docker", "podman") if shutil.which(c)), None)
+    landlock = probe_landlock()
+    if landlock.available:
+        landlock_evidence = (
+            f"kernel Landlock ABI {landlock.landlock_abi}: workspace read-only, "
+            "HOME and /proc unreachable"
+            + (", all TCP connect/bind denied" if landlock.blocks_tcp
+               else "; ABI < 4 does not restrict TCP"))
+    else:
+        landlock_evidence = f"unavailable: {landlock.reason}"
     return {
+        "landlock": SandboxBackend(
+            name="landlock", available=landlock.available, evidence=landlock_evidence),
         "process": SandboxBackend(
             name="process", available=True,
-            evidence="宿主进程级隔离：独立工作区 + 子进程参数列表 + 进程组超时清理；"
-                     "非容器隔离，边界弱于计划书目标，容器可用后升级"),
+            evidence="host process isolation only: clean environment + rlimits + "
+                     "process-group timeout kill; without Landlock the filesystem and "
+                     "network are not restricted"),
         "container": SandboxBackend(
-            name="container", available=container_cmd is not None,
-            evidence=f"container runtime probe: {container_cmd or 'docker/podman not found'}"
-                     ""),
+            name="container", available=False,
+            evidence=f"not implemented (container runtime probe: {container_cmd or 'not found'})"),
     }
 
 

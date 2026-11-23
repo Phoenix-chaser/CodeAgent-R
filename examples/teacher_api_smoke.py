@@ -99,7 +99,8 @@ def main(argv: list[str] | None = None, *, client_factory=None) -> int:
         status_code = getattr(error, "status_code", None)
         emit({
             "status": "request_error",
-            "error": "The API request or response failed. Check account access, endpoint, model, quota, and network. No automatic retry was sent.",
+            "error": "The API request or response failed. Check account access, endpoint, "
+                     "model, quota, and network. No automatic retry was sent.",
             "http_status": status_code if isinstance(status_code, int) and not isinstance(status_code, bool) else None,
         })
         return 1

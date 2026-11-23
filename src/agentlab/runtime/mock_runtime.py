@@ -7,8 +7,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 
 from agentlab.contracts import (
     ArtifactRef, CostAmount, EpisodeConfig, PublicTask, RunResult,
@@ -59,7 +58,8 @@ class MockRuntime:
              {"task_id": task.task_id, "runtime": self.name})
         exit_status: str = "ok"
         error_detail: dict = {}
-        op = lambda i: f"{episode.episode_id}:{episode.attempt}:{i}"
+        def op(i):
+            return f"{episode.episode_id}:{episode.attempt}:{i}"
 
         for i, st in enumerate(steps):
             try:

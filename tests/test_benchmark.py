@@ -12,8 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agentlab.benchmark import TaskStore, build_all, grade, parse_diff_paths
-from agentlab.contracts import ContractError
+from agentlab.benchmark import TaskStore, build_all, grade
 
 
 @pytest.fixture(scope="module")

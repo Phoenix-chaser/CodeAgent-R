@@ -4,12 +4,15 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from agentlab.dpo.loss import dpo_loss, sequence_logp
-from agentlab.training.hf_dpo import DPOCollator, DPODataset, _logp_batch, _target_only
+from agentlab.dpo.loss import dpo_loss
+from agentlab.training.hf_dpo import (
+    DPOCollator, DPODataset, _logp_batch, _target_only, dpo_step, pair_objectives,
+)
 
 
 class FakeChatTokenizer:
@@ -81,7 +84,7 @@ def test_dataset_filters_and_masks(tmp_path):
     assert data.stats.skipped_invalid == 2
     sample = data[0]
     prefix_len = len(FakeChatTokenizer().apply_chat_template(
-        sample_messages := [{"role": "user", "content": "fix it"}],
+        [{"role": "user", "content": "fix it"}],
         tokenize=True, add_generation_prompt=True))
     assert sample["labels_chosen"][:prefix_len] == [-100] * prefix_len
     assert sample["labels_rejected"][:prefix_len] == [-100] * prefix_len
@@ -152,6 +155,51 @@ def test_micro_dpo_step_moves_policy_toward_chosen():
     optimizer.step()
     assert not torch.equal(before, policy.head.weight.detach())
     # reference 不得有梯度
+    assert all(p.grad is None for p in reference.parameters())
+
+
+def test_pair_objectives_use_one_loss_per_pair_with_its_own_beta():
+    logp_c = torch.tensor([-1.0, -2.0], requires_grad=True)
+    logp_r = torch.tensor([-3.0, -1.0])
+    ref_c, ref_r = torch.tensor([-1.5, -2.0]), torch.tensor([-2.5, -0.5])
+    betas = [0.1, 0.01]
+    metrics = pair_objectives(logp_c, logp_r, ref_c, ref_r, betas)
+    singles = [dpo_loss(logp_c[i:i + 1], logp_r[i:i + 1], ref_c[i:i + 1], ref_r[i:i + 1],
+                        beta=beta) for i, beta in enumerate(betas)]
+    assert torch.allclose(metrics["loss"], torch.stack([s["loss"] for s in singles]).mean())
+    assert torch.allclose(metrics["reward_margin"],
+                          torch.stack([s["reward_margin"].reshape(()) for s in singles]).mean())
+    assert metrics["preference_accuracy"].item() == 1.0     # 两对都是 chosen 更受偏好
+    # 第 2 对只用了自己的 β：margin 是 β₂ 量级，不是 β₁
+    assert abs(metrics["reward_margin"].item() - (0.1 + 0.005) / 2) < 1e-6
+    metrics["loss"].backward()
+    assert logp_c.grad is not None and torch.isfinite(logp_c.grad).all()
+    with pytest.raises(ValueError):
+        pair_objectives(logp_c, logp_r, ref_c, ref_r, [0.1])
+
+
+def test_dpo_step_updates_only_the_policy():
+    """The body of one training-loop step (CUDA-only in production), run on CPU."""
+    batch = DPOCollator(pad_token_id=0)([
+        {"input_ids_chosen": [1, 2, 3, 4, 5], "labels_chosen": [-100, -100, 3, 4, 5],
+         "input_ids_rejected": [1, 2, 9, 8, 7], "labels_rejected": [-100, -100, 9, 8, 7],
+         "group_solvable": False},
+        {"input_ids_chosen": [1, 2, 3, 4, 6], "labels_chosen": [-100, -100, 3, 4, 6],
+         "input_ids_rejected": [1, 2, 9, 8, 5], "labels_rejected": [-100, -100, 9, 8, 5],
+         "group_solvable": True},
+    ])
+    policy, reference = TinyLM(), TinyLM()
+    reference.load_state_dict(policy.state_dict())
+    for parameter in reference.parameters():
+        parameter.requires_grad_(False)
+    optimizer = torch.optim.SGD(policy.parameters(), lr=0.5)
+    before = policy.head.weight.detach().clone()
+    step = dpo_step(policy, reference, batch, [0.1, 0.01], optimizer=optimizer,
+                    device=torch.device("cpu"), autocast=False)
+    assert set(step) == {"loss", "reward_margin", "preference_accuracy"}
+    assert all(torch.isfinite(torch.tensor(value)) for value in step.values())
+    assert 0.0 <= step["preference_accuracy"] <= 1.0
+    assert not torch.equal(before, policy.head.weight.detach())
     assert all(p.grad is None for p in reference.parameters())
 
 

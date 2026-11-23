@@ -1,4 +1,8 @@
-"""Content-verified receipts for the single-GPU experiment runner (stdlib only)."""
+"""Content-verified receipts for the single-GPU experiment runner.
+
+Depends only on the standard library and ``agentlab.models``: this script runs
+before the training stack is installed.
+"""
 from __future__ import annotations
 
 import argparse
@@ -7,6 +11,9 @@ import json
 import os
 from pathlib import Path
 import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from agentlab.models import DEFAULT_MODEL, default_revision, install_extra  # noqa: E402
 
 
 def canonical_hash(value):
@@ -64,8 +71,8 @@ def initialize():
     exp = Path(env.get('EXP_DIR', 'data/experiment-v2')).resolve()
     config = {'schema_version': 1, 'experiment_dir': str(exp)}
     defaults = {
-        'MODEL': 'Qwen/Qwen2.5-Coder-7B-Instruct',
-        'MODEL_REVISION': 'c03e6d358207e414f1eca0bb1891e29f1db0e242',
+        'MODEL': DEFAULT_MODEL,
+        'MODEL_REVISION': '',
         'TRAIN_CANDIDATES': '12', 'DEV_CANDIDATES': '4', 'MAX_PER_TASK': '1',
         'EPOCHS': '3', 'LR': '2e-5', 'BATCH_SIZE': '1', 'GRAD_ACCUM': '8',
         'MAX_LENGTH': '2048', 'LORA_R': '16', 'LORA_ALPHA': '32',
@@ -76,6 +83,10 @@ def initialize():
         'REVALIDATE_STALE': '0',
     }
     config.update({key: env.get(key, default) for key, default in defaults.items()})
+    # revision 与模型成对：没有显式指定时用该模型已核对的固定版本，
+    # 这样换了模型却沿用旧 revision 的情况不会悄悄发生
+    if not config['MODEL_REVISION']:
+        config['MODEL_REVISION'] = default_revision(config['MODEL']) or ''
     for key in ('CKPT_DIR', 'SFT_DIR', 'EVAL_OUTPUT_DIR', 'TRAIN_CANDIDATES_FILE',
                 'DEV_CANDIDATES_FILE'):
         config[key] = str(Path(env[key]).resolve()) if env.get(key) else None
@@ -98,15 +109,17 @@ def initialize():
     print('\t'.join(values))
 
 
-def validate_split(directory, pool, seed=None):
+def validate_split(directory, pool, seed=None, dev_ratio=0.15, test_ratio=0.15):
+    """与请求的 seed 和比例比较；默认值是阶段脚本自己的默认划分。"""
     directory = Path(directory)
-    frozen = [json.loads(line) for line in (directory / 'tasks.jsonl').read_text(encoding='utf-8').splitlines() if line.strip()]
+    frozen = [json.loads(line) for line in
+              (directory / 'tasks.jsonl').read_text(encoding='utf-8').splitlines() if line.strip()]
     manifest = json.loads((directory / 'split-manifest.json').read_text(encoding='utf-8'))
     if canonical_hash(frozen) != manifest['tasks_sha256']:
         raise ValueError('Frozen tasks differ from split-manifest.json; use a new EXP_DIR')
     if seed is not None and (manifest.get('seed') != seed
-                             or manifest.get('dev_ratio') != 0.15
-                             or manifest.get('test_ratio') != 0.15):
+                             or manifest.get('dev_ratio') != dev_ratio
+                             or manifest.get('test_ratio') != test_ratio):
         raise ValueError('Frozen split configuration differs; use a new EXP_DIR')
     audit_path = directory / 'audit-manifest.json'
     if audit_path.exists():
@@ -128,6 +141,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('init')
+    for name, argument in (('revision', 'model'), ('install-extra', 'model')):
+        child = sub.add_parser(name, help='stdlib lookup used by the stage script')
+        child.add_argument(argument)
     for name in ('check', 'mark'):
         child = sub.add_parser(name)
         child.add_argument('--receipt', required=True)
@@ -137,12 +153,18 @@ def main(argv=None):
     child.add_argument('--directory', required=True)
     child.add_argument('--pool')
     child.add_argument('--seed', type=int)
+    child.add_argument('--dev-ratio', type=float, default=0.15)
+    child.add_argument('--test-ratio', type=float, default=0.15)
     args = parser.parse_args(argv)
     try:
         if args.command == 'init':
             initialize()
+        elif args.command == 'revision':
+            print(default_revision(args.model) or '')
+        elif args.command == 'install-extra':
+            print(install_extra(args.model))
         elif args.command == 'validate-split':
-            validate_split(args.directory, args.pool, args.seed)
+            validate_split(args.directory, args.pool, args.seed, args.dev_ratio, args.test_ratio)
         elif args.command == 'mark':
             mark_receipt(args.receipt, args.inputs, args.outputs)
         else:

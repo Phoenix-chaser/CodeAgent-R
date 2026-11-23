@@ -1,15 +1,15 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="516" height="28" viewBox="0 0 516 28" role="img" aria-labelledby="title">
-  <title id="title">Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x for training, 470 tests passed, MIT license</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="528" height="28" viewBox="0 0 528 28" role="img" aria-labelledby="title">
+  <title id="title">Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x or 5.x for training, 532 tests passed, MIT license</title>
   <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif" font-size="12" font-weight="650" text-anchor="middle">
     <rect x="0" width="90" height="26" rx="5" fill="#234873"/>
     <text x="45" y="17.5" fill="#edf6ff">Python 3.10+</text>
     <rect x="96" width="141" height="26" rx="5" fill="#624033"/>
     <text x="166.5" y="17.5" fill="#fff1e9">PyTorch · NF4 QLoRA</text>
-    <rect x="243" width="118" height="26" rx="5" fill="#584a20"/>
-    <text x="302" y="17.5" fill="#fff3be">Transformers 4.x</text>
-    <rect x="367" width="99" height="26" rx="5" fill="#175545"/>
-    <text x="416.5" y="17.5" fill="#e1fff0">470 passed</text>
-    <rect x="472" width="44" height="26" rx="5" fill="#493d61"/>
-    <text x="494" y="17.5" fill="#f6ecff">MIT</text>
+    <rect x="243" width="132" height="26" rx="5" fill="#584a20"/>
+    <text x="309" y="17.5" fill="#fff3be">Transformers 4.x · 5.x</text>
+    <rect x="381" width="99" height="26" rx="5" fill="#175545"/>
+    <text x="430.5" y="17.5" fill="#e1fff0">532 passed</text>
+    <rect x="486" width="44" height="26" rx="5" fill="#493d61"/>
+    <text x="508" y="17.5" fill="#f6ecff">MIT</text>
   </g>
 </svg>
