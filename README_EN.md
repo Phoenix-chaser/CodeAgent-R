@@ -2,7 +2,7 @@
 
 **Post-training for code repair** · [中文](README.md)
 
-![Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x or 5.x for training, 535 tests passed, MIT license.](docs/images/project-facts.svg)
+![Python 3.10+, PyTorch NF4 QLoRA, Transformers 4.x or 5.x for training, 536 tests passed, MIT license.](docs/images/project-facts.svg)
 
 CodeAgent-R is a reproducible pipeline for post-training and execution-based evaluation of code repair: a frozen task pool, grading by execution, QLoRA SFT / DPO / RFT, selection on dev, and a paired comparison with the base model (Base) on frozen test data. All published experiments evaluate **Qwen2.5-Coder-7B-Instruct** on 104 self-authored repairs of single Python files. Qwen3.5-9B is supported as well. It has no results yet; smoke-test it before the first real run.
 

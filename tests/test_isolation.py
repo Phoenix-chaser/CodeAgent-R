@@ -171,6 +171,28 @@ def test_mode_is_resolved_from_environment(monkeypatch):
         isolation.resolve_mode()
 
 
+def test_repeated_policies_do_not_accumulate_rules(tmp_path):
+    """采集、选型和终评都在一个进程里连续判分几百次。
+
+    解释器规则表是进程内缓存的；构造策略时如果往这张表上追加本次的工作区规则，
+    策略参数会随判分次数线性增长，约 300 次后超过单个参数 128KB 的上限，之后这个
+    进程里的沙箱进程全都起不来（E2BIG）。测试套件本身到不了这个次数。
+    """
+    counts, largest_argument = set(), 0
+    for index in range(60):
+        workspace = tmp_path / f"ws-{index}"
+        workspace.mkdir()
+        policy = isolation.build_policy(workspace, tmp_path / f"scratch-{index}",
+                                        mode="process")
+        counts.add(len(policy.rules))
+        largest_argument = max(
+            largest_argument,
+            max(len(argument) for argument in policy.command([sys.executable, "-c", "pass"])))
+    assert len(counts) == 1                                   # 规则条数不随调用次数增长
+    assert counts.pop() == len(isolation._interpreter_rules()) + 3
+    assert largest_argument < 20000                           # 远低于 128KB 的上限
+
+
 def test_command_must_use_an_absolute_interpreter(tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()

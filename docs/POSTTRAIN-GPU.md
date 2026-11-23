@@ -6,7 +6,7 @@
 
 ## 环境与模型
 
-使用 Linux 或 WSL2、Python 3.10+ 和支持 bf16 的 CUDA GPU。报告使用 7B 模型、NF4 双量化、长度 2048 和 microbatch 1。24 GB 单卡可作起点，实际占用取决于序列长度、驱动和依赖版本。先安装与驱动匹配的 CUDA PyTorch，再安装训练依赖。[依赖范围](../pyproject.toml)
+用 `git clone` 或解压发布包都可以，解压后的目录没有 `.git` 不影响任何阶段。使用 Linux 或 WSL2、Python 3.10+ 和支持 bf16 的 CUDA GPU。报告使用 7B 模型、NF4 双量化、长度 2048 和 microbatch 1。24 GB 单卡可作起点，实际占用取决于序列长度、驱动和依赖版本。先安装与驱动匹配的 CUDA PyTorch，再安装训练依赖。[依赖范围](../pyproject.toml)
 
 ```bash
 python -m pip install -e ".[dev,train,api]"

@@ -2,7 +2,7 @@
 
 **代码修复模型的后训练与执行评测** · [English](README_EN.md)
 
-![Python 3.10+、PyTorch NF4 QLoRA、训练使用 Transformers 4.x 或 5.x、535 项测试通过、MIT 许可证。](docs/images/project-facts.svg)
+![Python 3.10+、PyTorch NF4 QLoRA、训练使用 Transformers 4.x 或 5.x、536 项测试通过、MIT 许可证。](docs/images/project-facts.svg)
 
 CodeAgent-R 是一套可复现的代码修复后训练与评测流水线：冻结任务池、执行判分、QLoRA SFT / DPO / RFT、在 dev 上选型、在冻结的 test 上与基座模型（Base）配对比较。已发表的实验全部在 104 道自写的 Python 单文件修复题上评测 **Qwen2.5-Coder-7B-Instruct**。另支持 Qwen3.5-9B，它还没有实验结果，首次运行前先做冒烟测试。
 

@@ -5,6 +5,7 @@
 """
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -225,8 +226,15 @@ def test_unlisted_files_are_rejected(artifacts, tmp_path):
     assert any("not listed" in problem for problem in problems)
 
 
-def test_evidence_files_are_not_gitignored():
-    result = subprocess.run(
-        ["git", "check-ignore", "docs/evidence/seed42/test/base.json",
-         "docs/evidence/seed42/training-log.json"], cwd=ROOT)
-    assert result.returncode == 1                   # 1 = 没有任何路径被忽略
+def test_evidence_files_are_not_gitignored(tmp_path):
+    """在临时仓库里检查忽略规则。项目也以压缩包部署，解包后的目录没有 .git，
+    所以不能假定当前目录是仓库（`env` 阶段会在那里运行全量测试）。"""
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    shutil.copyfile(ROOT / ".gitignore", tmp_path / ".gitignore")
+    published = ["docs/evidence/seed42/test/base.json", "docs/evidence/seed42/training-log.json"]
+    local_only = ["docs/evidence/seed42/train.jsonl", "results/seed42/base.json"]
+    for relative in [*published, *local_only]:
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).touch()
+    assert subprocess.run(["git", "check-ignore", *published], cwd=tmp_path).returncode == 1
+    assert subprocess.run(["git", "check-ignore", *local_only], cwd=tmp_path).returncode == 0

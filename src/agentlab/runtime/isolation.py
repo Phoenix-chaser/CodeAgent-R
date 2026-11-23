@@ -342,7 +342,7 @@ def _loader_libraries(loader: str | None, binary: str) -> list[str]:
 
 
 @lru_cache(maxsize=1)
-def _interpreter_rules() -> list[tuple[str, list[str]]]:
+def _interpreter_rules() -> tuple[tuple[str, list[str]], ...]:
     """被测进程启动所需的解释器、标准库、site-packages 与共享库。
 
     解释器的布局在一个进程内不会变，所以只计算一次。
@@ -380,7 +380,8 @@ def _interpreter_rules() -> list[tuple[str, list[str]]]:
     # 只有解释器和动态加载器本身可作为程序执行
     executables = {executable} | ({os.path.realpath(loader)} if loader else set())
     rules += [(path, ["READ_FILE", "EXECUTE"]) for path in sorted(executables)]
-    return rules
+    # 不可变：这个结果被缓存并在整个进程里复用，调用方不能往里追加
+    return tuple(rules)
 
 
 _SELF_TEST_CODE = ("import bz2, ctypes, decimal, hashlib, json, lzma, sqlite3, ssl, "
@@ -443,10 +444,11 @@ def build_policy(workspace: Path, scratch: Path, mode: str | None = None,
     if os.path.isdir(user_site) and user_site in sys.path:
         env["PYTHONPATH"] = user_site
 
-    rules = _interpreter_rules()
-    rules.append((str(workspace), list(_READ)))
-    rules.append((str(scratch), list(_WRITE)))
-    rules += [(device, ["READ_FILE", "WRITE_FILE"]) for device in ("/dev/null",)]
+    # 每次都新建列表。解释器规则是进程内缓存的；早先的写法直接往缓存的那张表上追加
+    # 本次的工作区规则，一个进程里判分几百次之后，策略参数就超过单个参数的上限，
+    # 之后这个进程里的沙箱进程全都起不来（E2BIG）。
+    rules = [*_interpreter_rules(), (str(workspace), list(_READ)), (str(scratch), list(_WRITE)),
+             *((device, ["READ_FILE", "WRITE_FILE"]) for device in ("/dev/null",))]
     return SandboxPolicy(
         mode=mode, workspace=workspace, scratch=scratch,
         probe=probe_landlock() if mode == "landlock" else None,

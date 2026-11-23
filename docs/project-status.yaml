@@ -26,8 +26,8 @@ current_update:
 review_2026_11_23:
   date: '2026-11-23'
   record: docs/REVIEW-2026-11-23.md
-  offline_tests: 535 passed
-  test_seconds: 55.4
+  offline_tests: 536 passed
+  test_seconds: 49.9
   command: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider
   lint: ruff check . 通过
   grader:
