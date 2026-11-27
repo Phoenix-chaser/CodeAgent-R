@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="920" height="330" viewBox="0 0 920 330" role="img" aria-labelledby="title description">
+  <title id="title">The 20 frozen test tasks, grouped by outcome</title>
+  <desc id="description">One tile per task, grouped by outcome. Base repaired 12 tasks. SFT with seed 42 fixed one more, with zero regressions. Seven tasks were never repaired by any evaluated method. Each task is five percentage points.</desc>
+  <defs>
+    <linearGradient id="paper" x2="1" y2=".25" gradientUnits="objectBoundingBox">
+      <stop stop-color="#182439"/>
+      <stop offset="1" stop-color="#102937"/>
+    </linearGradient>
+  </defs>
+  <rect width="920" height="330" rx="12" fill="url(#paper)"/>
+  <g font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+    <text x="28" y="60" font-size="28" font-weight="650" fill="#f6f9fc">20 frozen test tasks</text>
+    <text x="892" y="60" font-size="26" fill="#c8d6df" text-anchor="end">each task = 5 percentage points</text>
+    <g fill="#8bb8ff">
+      <rect x="23" y="84" width="38" height="72" rx="9"/>
+      <rect x="67" y="84" width="38" height="72" rx="9"/>
+      <rect x="111" y="84" width="38" height="72" rx="9"/>
+      <rect x="155" y="84" width="38" height="72" rx="9"/>
+      <rect x="199" y="84" width="38" height="72" rx="9"/>
+      <rect x="243" y="84" width="38" height="72" rx="9"/>
+      <rect x="287" y="84" width="38" height="72" rx="9"/>
+      <rect x="331" y="84" width="38" height="72" rx="9"/>
+      <rect x="375" y="84" width="38" height="72" rx="9"/>
+      <rect x="419" y="84" width="38" height="72" rx="9"/>
+      <rect x="463" y="84" width="38" height="72" rx="9"/>
+      <rect x="507" y="84" width="38" height="72" rx="9"/>
+    </g>
+    <rect x="551" y="84" width="38" height="72" rx="9" fill="#71dbbc" stroke="#f6f9fc" stroke-width="2.5"/>
+    <g fill="#2b3d50" stroke="#4a5d70">
+      <rect x="595" y="84" width="38" height="72" rx="9"/>
+      <rect x="639" y="84" width="38" height="72" rx="9"/>
+      <rect x="683" y="84" width="38" height="72" rx="9"/>
+      <rect x="727" y="84" width="38" height="72" rx="9"/>
+      <rect x="771" y="84" width="38" height="72" rx="9"/>
+      <rect x="815" y="84" width="38" height="72" rx="9"/>
+      <rect x="859" y="84" width="38" height="72" rx="9"/>
+    </g>
+    <rect x="28" y="193" width="26" height="26" rx="6" fill="#8bb8ff"/>
+    <text x="68" y="217" font-size="32" font-weight="750" fill="#8bb8ff">12</text>
+    <text x="132" y="216" font-size="27" fill="#f6f9fc">repaired by Base</text>
+    <rect x="28" y="241" width="26" height="26" rx="6" fill="#71dbbc"/>
+    <text x="68" y="265" font-size="32" font-weight="750" fill="#71dbbc">+1</text>
+    <text x="132" y="264" font-size="27" fill="#f6f9fc">fixed by SFT (seed 42) · zero regressions</text>
+    <rect x="28" y="289" width="26" height="26" rx="6" fill="#2b3d50" stroke="#4a5d70"/>
+    <text x="68" y="313" font-size="32" font-weight="750" fill="#9fb3c6">7</text>
+    <text x="132" y="312" font-size="27" fill="#f6f9fc">never repaired by any evaluated method</text>
+  </g>
+</svg>
