@@ -39,6 +39,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init-adapter", default=None,
                         help="Existing adapter to continue training from (RFT)")
     parser.add_argument("--dry-run", action="store_true", help="只审计数据，不加载模型")
+    parser.add_argument("--chunked-loss", action=argparse.BooleanOptionalAction, default=True,
+                        help="分段过 lm_head 和交叉熵，长样本不会在显存里放下全部 logits（默认开启；"
+                             "训练前会和模型自带的损失核对）")
+    parser.add_argument("--allow-unverified", action="store_true",
+                        help="对照组专用：训练数据不按 strict_pass 筛选（见 scripts/rft_control.py）")
     parser.add_argument("--save-every-epoch", action=argparse.BooleanOptionalAction,
                         default=True, help="保留各 epoch adapter，供独立 dev 执行评测选择（默认开启）")
     parser.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing",

@@ -171,6 +171,21 @@ def test_mode_is_resolved_from_environment(monkeypatch):
         isolation.resolve_mode()
 
 
+def test_degraded_mode_warning_is_printed_once_per_process(monkeypatch, capsys):
+    """一次评测要判几百次分，每次都提示降级会淹没日志。"""
+    monkeypatch.setenv("AGENTLAB_SANDBOX", "auto")
+    monkeypatch.setattr(isolation, "_warned_reason", None)
+    monkeypatch.setattr(isolation, "probe_landlock",
+                        lambda: isolation.SandboxProbe(0, "simulated: old kernel"))
+    for _ in range(3):
+        assert isolation.resolve_mode() == "process"
+    assert capsys.readouterr().err.count("Landlock 不可用") == 1
+    monkeypatch.setattr(isolation, "probe_landlock",
+                        lambda: isolation.SandboxProbe(0, "simulated: another reason"))
+    isolation.resolve_mode()
+    assert capsys.readouterr().err.count("another reason") == 1       # 原因变了才再说一次
+
+
 def test_repeated_policies_do_not_accumulate_rules(tmp_path):
     """采集、选型和终评都在一个进程里连续判分几百次。
 

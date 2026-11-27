@@ -15,17 +15,19 @@ agentlab = "agentlab.cli:main"
 dev = ["pytest>=8.0", "torch>=2.0"]
 api = ["openai>=1.0"]
 lint = ["ruff>=0.9"]
+# 默认模型是 Qwen3.5：它的模型代码从 transformers 5.2.0 才开始有
 train = [
     "torch>=2.4,<3",
-    "transformers>=4.46,<5",
+    "transformers>=5.2,<6",
+    "jinja2>=3.1.6",
     "peft>=0.13,<1",
     "accelerate>=1,<2",
     "bitsandbytes>=0.44,<1",
 ]
-# Qwen3.5 及更新的架构：模型代码从 transformers 5.2.0 才开始有
-train-qwen35 = [
+# Qwen2.5 系列：已发表的结果在 transformers 4.x 上得到，复现时用它
+train-qwen25 = [
     "torch>=2.4,<3",
-    "transformers>=5.2,<6",
+    "transformers>=4.46,<5",
     "peft>=0.13,<1",
     "accelerate>=1,<2",
     "bitsandbytes>=0.44,<1",

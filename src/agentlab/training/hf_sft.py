@@ -30,6 +30,7 @@ from agentlab.training.hf_runtime import (
     apply_chat_template, assert_model_supported, load_causal_lm, load_tokenizer,
     lora_targets_for, resolve_revision,
 )
+from agentlab.training.sequence_loss import compare_losses, consistent, sequence_loss
 
 
 def _as_list(ids: Any) -> list[int]:
@@ -374,8 +375,11 @@ def parameter_delta(before: dict[str, torch.Tensor], model: torch.nn.Module) -> 
 
 
 def evaluate_loss(model: torch.nn.Module, dataloader: Iterable[dict[str, torch.Tensor]],
-                  device: torch.device) -> dict[str, float | int]:
-    """Return token-weighted causal LM loss; no per-batch mean bias."""
+                  device: torch.device, *, chunked: bool = False) -> dict[str, float | int]:
+    """Return token-weighted causal LM loss; no per-batch mean bias.
+
+    ``chunked`` 为真时用 ``sequence_loss`` 分段算，长样本不会在显存里放下全部 logits。
+    """
     was_training = model.training
     model.eval()
     weighted_sum = 0.0
@@ -389,13 +393,18 @@ def evaluate_loss(model: torch.nn.Module, dataloader: Iterable[dict[str, torch.T
             context = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
                        if device.type == "cuda" else nullcontext())
             with context:
-                outputs = model(
-                    input_ids=batch["input_ids"].to(device),
-                    attention_mask=batch["attention_mask"].to(device),
-                    labels=labels.to(device))
-            if not torch.isfinite(outputs.loss):
+                if chunked:
+                    loss = sequence_loss(model, batch["input_ids"].to(device),
+                                         batch["attention_mask"].to(device), labels.to(device),
+                                         recompute=False)
+                else:
+                    loss = model(
+                        input_ids=batch["input_ids"].to(device),
+                        attention_mask=batch["attention_mask"].to(device),
+                        labels=labels.to(device)).loss
+            if not torch.isfinite(loss):
                 raise FloatingPointError("validation loss is not finite")
-            weighted_sum += float(outputs.loss.detach().item()) * n
+            weighted_sum += float(loss.detach().item()) * n
             n_tokens += n
     if was_training:
         model.train()
@@ -471,18 +480,25 @@ def train(args: Any) -> dict[str, Any]:
 
     revision = resolve_revision(args.model, args.revision)
     tokenizer = load_tokenizer(args.model, revision, padding_side="right")
-    train_data = SFTDataset(args.data, tokenizer, args.max_length, split="train")
+    # 默认只训练判分通过的样本；对照组（--allow-unverified）刻意不按判分结果筛选
+    strict_only = not getattr(args, "allow_unverified", False)
+    train_data = SFTDataset(args.data, tokenizer, args.max_length, split="train",
+                            strict_pass_only=strict_only)
     if not len(train_data):
         raise ValueError(f"训练集为空：{train_data.report()}")
     dev_data = None
     if args.eval_data:
-        dev_data = SFTDataset(args.eval_data, tokenizer, args.max_length, split="dev")
+        dev_data = SFTDataset(args.eval_data, tokenizer, args.max_length, split="dev",
+                              strict_pass_only=strict_only)
         if not len(dev_data):
             raise ValueError(f"dev 集为空：{dev_data.report()}")
         validate_split_isolation(train_data.stats, dev_data.stats)
     print(train_data.report(), flush=True)
     if dev_data:
         print(dev_data.report(), flush=True)
+    if not strict_only:
+        print("警告：--allow-unverified 已打开，训练数据没有按判分结果筛选；这只用于对照组。",
+              flush=True)
     # 读完数据就核对基座架构：transformers 太旧时在下载权重之前失败
     assert_model_supported(args.model, revision)
     if args.dry_run:
@@ -519,7 +535,9 @@ def train(args: Any) -> dict[str, Any]:
     print(f"加载基座模型 {args.model}（首次运行需下载权重；NF4 量化加载约 1-3 分钟，"
           "此段无输出属正常）…", flush=True)
     model = load_causal_lm(args.model, revision)
-    resolved_revision = getattr(model.config, "_commit_hash", None)
+    # transformers 4.x 把实际加载的提交记在 config._commit_hash；5.x 不再设置这个属性。
+    # 请求的版本是固定的完整提交号时，实际加载的就是它；评测端用同一个值核对。
+    resolved_revision = getattr(model.config, "_commit_hash", None) or revision
     model = prepare_model_for_kbit_training(
         model, use_gradient_checkpointing=args.gradient_checkpointing,
         gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -554,6 +572,23 @@ def train(args: Any) -> dict[str, Any]:
            for name, p in model.named_parameters()):
         raise RuntimeError("base weights are not frozen")
     before = _capture_trainable(model)
+    # 分段算损失（默认）：开始之前在最短样本的最后一段上和模型自带的损失核对一次。
+    # 只取 512 个 token，是因为自带的做法要放下这段输入的全部 logits
+    chunked_loss = getattr(args, "chunked_loss", True)
+    loss_check = None
+    if chunked_loss:
+        probe = min(train_data.samples, key=lambda sample: len(sample["input_ids"]))
+        window = slice(-512, None)
+        with torch.no_grad(), torch.autocast(
+                device_type="cuda", dtype=torch.bfloat16, enabled=device.type == "cuda"):
+            loss_check = compare_losses(
+                model, torch.tensor([probe["input_ids"][window]], device=device), None,
+                torch.tensor([probe["labels"][window]], device=device))
+        if not consistent(loss_check):
+            raise RuntimeError(
+                "分段损失与模型自带的损失不一致："
+                f"{loss_check}。换一种做法：--no-chunked-loss")
+        print(f"分段损失与模型自带的损失一致（相差 {loss_check['difference']:.1e}）", flush=True)
 
     collator = Collator(tokenizer.pad_token_id)
     generator = torch.Generator().manual_seed(args.seed)
@@ -576,7 +611,8 @@ def train(args: Any) -> dict[str, Any]:
     log_path = output_dir / "training-log.jsonl"
     best_dir = output_dir / "best_adapter"
     print("模型加载完成，计算未训练基线的 dev loss…", flush=True)
-    baseline_dev = evaluate_loss(model, dev_loader, device) if dev_loader else {"loss": float("inf"), "tokens": 0}
+    baseline_dev = (evaluate_loss(model, dev_loader, device, chunked=chunked_loss) if dev_loader
+                    else {"loss": float("inf"), "tokens": 0})
     best_loss = baseline_dev["loss"]
     best_epoch = 0
     no_improve = 0
@@ -594,6 +630,8 @@ def train(args: Any) -> dict[str, Any]:
         "tokenizer_revision": getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
         "chat_template_sha256": hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
         "lora": {"target_modules": lora_targets, "targeted_modules": targeted_modules},
+        "loss_implementation": "chunked_lm_head" if chunked_loss else "model_labels",
+        "loss_check": loss_check,
         "baseline_dev": baseline_dev, "history": history, "best_epoch": 0,
         "best_dev_loss": best_loss, "optimizer_steps": 0,
         "checkpoint_index": "checkpoint-index.json",
@@ -614,12 +652,13 @@ def train(args: Any) -> dict[str, Any]:
                     if not n:
                         continue
                     try:
+                        input_ids = batch["input_ids"].to(device)
+                        attention_mask = batch["attention_mask"].to(device)
+                        labels = batch["labels"].to(device)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                            outputs = model(
-                                input_ids=batch["input_ids"].to(device),
-                                attention_mask=batch["attention_mask"].to(device),
-                                labels=batch["labels"].to(device))
-                            loss = outputs.loss
+                            loss = (sequence_loss(model, input_ids, attention_mask, labels) if chunked_loss
+                                    else model(input_ids=input_ids, attention_mask=attention_mask,
+                                               labels=labels).loss)
                         if not torch.isfinite(loss):
                             raise FloatingPointError("training loss is not finite")
                         (loss * (n / denominator)).backward()
@@ -661,8 +700,8 @@ def train(args: Any) -> dict[str, Any]:
                           f"({global_step * 100 // total_steps}%) "
                           f"loss={entry['loss']:.4f} lr={entry['lr']:.2e} · "
                           f"已用 {elapsed / 60:.1f}m · 剩余≈{remaining / 60:.1f}m", flush=True)
-            dev_metrics = (evaluate_loss(model, dev_loader, device) if dev_loader
-                           else {"loss": float("inf"), "tokens": 0})
+            dev_metrics = (evaluate_loss(model, dev_loader, device, chunked=chunked_loss)
+                           if dev_loader else {"loss": float("inf"), "tokens": 0})
             epoch_entry = {
                 "epoch": epoch, "train_loss": epoch_loss_sum / epoch_tokens if epoch_tokens else float("inf"),
                 "dev_loss": dev_metrics["loss"], "dev_tokens": dev_metrics["tokens"],
@@ -725,6 +764,8 @@ def train(args: Any) -> dict[str, Any]:
         "tokenizer_revision": getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
         "chat_template_sha256": hashlib.sha256(str(tokenizer.chat_template).encode()).hexdigest(),
         "lora": {"target_modules": lora_targets, "targeted_modules": targeted_modules},
+        "loss_implementation": "chunked_lm_head" if chunked_loss else "model_labels",
+        "loss_check": loss_check,
         "configuration": config, "configuration_sha256": config_hash,
         "implementation_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "seed": args.seed, "data": train_data.stats.as_dict(),

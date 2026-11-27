@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -111,6 +112,45 @@ def choose_checkpoint(candidates, reports):
     }
 
 
+def expected_generation(args) -> dict:
+    """这里调 evaluate.py 时它写进报告的生成设置（贪心、单次、本地模型）。"""
+    generation = {"repeats": 1, "seed": args.seed, "temperature": 0.0,
+                  "max_new_tokens": args.max_new_tokens, "quantization": args.quantization,
+                  "decoding": "greedy", "backend": "transformers"}
+    if args.thinking:
+        generation["thinking"] = True
+    return generation
+
+
+def problems_with_report(path, specs, model, revision, generation, adapter) -> list[str]:
+    """已有的 dev 报告不能当作 ``adapter``（基座为 None）这次选型的结果时，返回原因。
+
+    多组实验只换 adapter 时，基座的 dev 结果每组都一样，重评一遍要几十分钟；选型中途
+    断了也不该把已经评完的 epoch 再评一遍。能复用的条件：同一批题、同一个模型版本、
+    同样的生成设置、同一个 adapter。
+    """
+    try:
+        report = read_json(path)
+    except (OSError, ValueError) as error:
+        return [f"读不出来（{error}）"]
+    if not isinstance(report, dict):
+        return ["不是一份报告"]
+    problems = []
+    if report.get("adapter") != adapter:
+        problems.append("报告带着 adapter" if adapter is None else "adapter 不同")
+    if report.get("split") != "dev":
+        problems.append("不是 dev 报告")
+    if report.get("model") != model or report.get("requested_revision") != revision:
+        problems.append("模型或版本不同")
+    if report.get("generation") != generation:
+        problems.append(f"生成设置不同：{report.get('generation')}")
+    if report.get("tasks_hash") != protocol_hash(specs):
+        problems.append("题目不同")
+    if report.get("contamination", {}).get("status") != "clean":
+        problems.append("缺少干净的训练重叠审计")
+    return problems
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-root", required=True)
@@ -119,12 +159,19 @@ def main():
     parser.add_argument("--quantization", choices=["nf4", "bf16"], default="nf4")
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=False,
+                        help="Evaluate with the model's thinking mode on (see evaluate.py --thinking)")
+    parser.add_argument("--base-report", default=None,
+                        help="Reuse an existing base (epoch 0) dev report instead of re-evaluating the base")
+    parser.add_argument("--resume", action="store_true",
+                        help="Continue in an existing output directory: keep finished dev reports, redo the rest")
     args = parser.parse_args()
     root = Path(args.checkpoint_root).expanduser().resolve()
     tasks_file = Path(args.tasks_file).expanduser().resolve()
     output = Path(args.output).expanduser().resolve()
-    if output.exists() and any(output.iterdir()):
-        parser.error("Selection output must be empty; prior evidence must not be overwritten")
+    if output.exists() and any(output.iterdir()) and not args.resume:
+        parser.error("Selection output must be empty; prior evidence must not be overwritten "
+                     "(use --resume to continue an interrupted selection)")
     manifest, candidates = checkpoint_candidates(root)
     specs = load_specs(tasks_file, "dev")
     if training_overlap(specs, root / "training-manifest.json")["status"] != "clean":
@@ -137,11 +184,31 @@ def main():
                      "candidates": candidates, "model": manifest["model"], "revision": revision,
                      "quantization": args.quantization, "seed": args.seed,
                      "max_new_tokens": args.max_new_tokens}
+    if args.thinking:
+        configuration["thinking"] = True
+    if args.base_report:
+        configuration["base_report"] = str(Path(args.base_report).resolve())
     (output / "selection-config.json").write_text(
         json.dumps(configuration, ensure_ascii=False, indent=2), encoding="utf-8")
     reports = []
     for candidate in candidates:
         report_path = output / f"epoch-{candidate['epoch']:03d}-dev.json"
+        expected = (manifest["model"], revision, expected_generation(args))
+        if candidate["adapter"] is None and args.base_report:
+            # 基座不重评：核对已有的报告和这次选型是同一套设置，再原样拷进来
+            problems = problems_with_report(args.base_report, specs, *expected, None)
+            if problems:
+                parser.error("基座报告不能复用：" + "；".join(problems))
+            shutil.copyfile(args.base_report, report_path)
+            print(f"基座 dev 报告复用自 {args.base_report}", flush=True)
+            reports.append(read_json(report_path))
+            continue
+        if args.resume and report_path.exists():
+            problems = problems_with_report(report_path, specs, *expected, candidate["adapter"])
+            if not problems:
+                print(f"epoch {candidate['epoch']} 的 dev 报告已经评完，跳过", flush=True)
+                reports.append(read_json(report_path))
+                continue
         command = [
             sys.executable, str(ROOT / "scripts/evaluate.py"), "--model", manifest["model"],
             "--revision", revision, "--tasks-file", str(tasks_file),
@@ -150,6 +217,8 @@ def main():
             "--seed", str(args.seed), "--max-new-tokens", str(args.max_new_tokens),
             "--output", str(report_path),
         ]
+        if args.thinking:
+            command.append("--thinking")
         if candidate["adapter"]:
             command.extend(["--adapter", candidate["adapter"]])
         subprocess.run(command, check=True)

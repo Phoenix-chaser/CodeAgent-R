@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import copy
 import json
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 from _shared_extract import extract_code
 from compare import make_report, paired_bootstrap, validate_comparison, wilson_interval
-from evaluate import content_hash, evaluate_candidate, summarize_results, training_overlap
+from evaluate import (content_hash, evaluate_candidate, generation_protocol, make_parser,
+                      summarize_results, training_overlap)
 from agentlab.benchmark.builder import SPECS, build_all
 from agentlab.benchmark.protocol import build_messages
 
@@ -254,3 +257,71 @@ def test_evaluation_retains_long_failed_response(tmp_path, monkeypatch):
     assert len(record["generated_code"]) > 200
     assert record["raw_response"] == response
     assert record["failure_type"] == "public_test_failure"
+
+
+def test_thinking_mode_grades_only_the_text_after_the_think_block(tmp_path):
+    """思考模式下回答在 </think> 之后；推理随完整回答留作证据，但不进判分器。"""
+    spec = SPECS[0]
+    task_dir, grade_dir = tmp_path / "tasks", tmp_path / "grade"
+    grade_dir.mkdir()
+    build_all(task_dir, specs=[spec])
+    reasoning = "The loop stops one element early.\n"
+    raw = reasoning + "</think>\n\n" + spec["fixed"]
+    record = evaluate_candidate(spec, raw, task_dir, grade_dir, thinking=True)
+    assert record["strict_pass"], record
+    assert record["generated_code"] == spec["fixed"]
+    assert record["raw_response"] == raw
+    assert record["reasoning_chars"] == len(reasoning.strip())
+    assert evaluate_candidate(spec, spec["fixed"], task_dir, grade_dir)["reasoning_chars"] == 0
+
+
+def test_unfinished_thinking_is_reported_without_reaching_the_grader(tmp_path, monkeypatch):
+    """额度用完时推理还没结束：记为“推理未结束”，不算代码错误，也不调判分器。"""
+    monkeypatch.setattr("evaluate.grade_one",
+                        lambda *args: pytest.fail("an unfinished answer has nothing to grade"))
+    record = evaluate_candidate(SPECS[0], "still reasoning about the loop", tmp_path, tmp_path,
+                               thinking=True)
+    assert record["verdict"] == "incomplete_thinking" and record["strict_pass"] is False
+    assert record["failure_type"] == "thinking_unfinished"
+    assert record["raw_response"] == "still reasoning about the loop"
+    metrics = summarize_results([record])
+    assert metrics["n_unfinished_thinking"] == 1
+    assert metrics["failure_counts"] == {"thinking_unfinished": 1}
+
+
+def test_thinking_flag_is_opt_in_and_rejects_the_sampling_strategies(tmp_path):
+    parser = make_parser()
+    base = ["--model", "Qwen/Qwen3.5-9B", "--output", "out.json"]
+    api = ["--api", "primary", "--output", "out.json"]      # 不带 --model，否则是"两者互斥"在报错
+    assert parser.parse_args(base).thinking is False            # 默认关闭，已有协议不变
+    assert parser.parse_args([*base, "--thinking"]).thinking is True
+    assert parser.parse_args([*base, "--thinking", "--no-thinking"]).thinking is False
+    for arguments in ([*base, "--thinking", "--strategy", "best-of-n"], [*api, "--thinking"]):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/evaluate.py"), *arguments],
+                                capture_output=True, text=True, timeout=60)
+        assert result.returncode == 2 and "--thinking" in result.stderr, result.stdout + result.stderr
+
+
+def test_default_protocol_is_unchanged_and_sampling_settings_are_recorded():
+    """top_p / top_k 取默认值时不进协议，旧报告的协议哈希不变；采样用了它们才记下来。"""
+    parser = make_parser()
+    base = ["--model", "Qwen/Qwen3.5-9B", "--output", "out.json"]
+    api = ["--api", "primary", "--output", "out.json"]      # 不带 --model，否则是"两者互斥"在报错
+    legacy = dict(repeats=1, seed=42, temperature=0.0, max_new_tokens=2048, quantization="nf4",
+                  decoding="greedy", backend="transformers")
+    assert generation_protocol(parser.parse_args(base)) == legacy
+    assert generation_protocol(parser.parse_args([*base, "--temperature", "1"])) == {
+        **legacy, "temperature": 1.0, "decoding": "sampling"}          # 以往的采样评测也不变
+    # Qwen3.5 给思考模式的推荐采样：temperature 0.6、top_p 0.95、top_k 20
+    official = parser.parse_args([*base, "--thinking", "--temperature", "0.6",
+                                  "--top-p", "0.95", "--top-k", "20"])
+    assert generation_protocol(official) == {**legacy, "temperature": 0.6, "decoding": "sampling",
+                                             "thinking": True, "top_p": 0.95, "top_k": 20}
+    for arguments, reason in (
+            ([*base, "--top-p", "0.9"], "temperature"),                 # 贪心解码时采样参数没有意义
+            ([*base, "--temperature", "0.6", "--top-k", "-1"], "top-k"),
+            ([*base, "--temperature", "0.6", "--top-p", "0"], "top-p"),
+            ([*api, "--temperature", "0.6", "--top-p", "0.9"], "local model")):
+        result = subprocess.run([sys.executable, str(ROOT / "scripts/evaluate.py"), *arguments],
+                                capture_output=True, text=True, timeout=60)
+        assert result.returncode == 2 and reason in result.stderr, result.stdout + result.stderr

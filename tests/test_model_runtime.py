@@ -14,12 +14,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from agentlab.models import (  # noqa: E402
-    DEFAULT_MODEL, default_revision, install_extra, needs_new_transformers,
+    DEFAULT_MODEL, QWEN25_MODEL, default_revision, install_extra,
 )
 from agentlab.training import hf_runtime  # noqa: E402
 from agentlab.training.hf_runtime import (  # noqa: E402
     BASE_LORA_TARGETS, HYBRID_LORA_TARGETS, apply_chat_template, check_version,
-    generate_text, lora_targets_for, prompt_inputs, resolve_revision,
+    generate_text, lora_targets_for, prompt_inputs, resolve_revision, split_thinking,
 )
 from agentlab.training.hf_sft import SFTDataset  # noqa: E402
 
@@ -193,19 +193,25 @@ def test_lora_targets_follow_the_modules_that_exist():
 
 def test_version_gate_and_model_table():
     check_version("qwen2", "4.46.0")
-    check_version("qwen3.5", "5.2.0")
-    for old in ("4.57.6", "5.1.0"):
-        with pytest.raises(RuntimeError, match="transformers >= 5.2.0"):
-            check_version("qwen3.5", old)
-    assert default_revision("Qwen/Qwen3.5-9B") == "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-    assert default_revision(None) == default_revision(DEFAULT_MODEL)
+    check_version("qwen3_5", "5.2.0")
+    for spelling in ("qwen3_5", "qwen3.5", "qwen3_5_moe"):     # config.model_type 与家族名
+        for old in ("4.57.6", "5.1.0"):
+            with pytest.raises(RuntimeError, match="transformers >= 5.2.0"):
+                check_version(spelling, old)
+    assert DEFAULT_MODEL == "Qwen/Qwen3.5-9B"
+    assert QWEN25_MODEL == "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert default_revision(None) == default_revision(DEFAULT_MODEL) == \
+        "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+    assert default_revision(QWEN25_MODEL) == "c03e6d358207e414f1eca0bb1891e29f1db0e242"
     assert default_revision("some-org/model") is None
     assert resolve_revision("some-org/model", "abc") == "abc"
     assert resolve_revision("some-org/model", None) is None
-    assert resolve_revision("Qwen/Qwen3.5-9B", None) == "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
-    assert needs_new_transformers("Qwen/Qwen3.5-9B") and not needs_new_transformers(DEFAULT_MODEL)
-    assert install_extra("Qwen/Qwen3.5-9B") == "train-qwen35"
-    assert install_extra(DEFAULT_MODEL) == "train"
+    assert resolve_revision(QWEN25_MODEL, None) == "c03e6d358207e414f1eca0bb1891e29f1db0e242"
+    assert install_extra(DEFAULT_MODEL) == "train"             # 默认依赖对应默认模型
+    assert install_extra("Qwen/Qwen3.5-35B-A3B") == "train"
+    assert install_extra("some-org/model") == "train"
+    assert install_extra(QWEN25_MODEL) == "train-qwen25"
+    assert install_extra("Qwen/Qwen2.5-7B-Instruct") == "train-qwen25"
 
 
 @needs_transformers
@@ -214,7 +220,7 @@ def test_unsupported_architecture_names_the_fix(monkeypatch):
         raise ValueError("model type 'qwen3_5' ... Transformers does not recognize this architecture")
 
     monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", unknown)
-    with pytest.raises(RuntimeError, match="train-qwen35"):
+    with pytest.raises(RuntimeError, match="5.2.0"):
         hf_runtime.assert_model_supported("Qwen/Qwen3.5-9B", "abc")
 
 
@@ -240,6 +246,9 @@ def test_model_loading_arguments_are_unchanged(monkeypatch):
     assert quantized["quantization_config"].bnb_4bit_quant_type == "nf4"
     assert quantized["quantization_config"].bnb_4bit_use_double_quant is True
     assert unquantized == {**common, "revision": None}
+    hf_runtime.load_causal_lm("org/model", None, "bf16", device="cpu")     # 冒烟测试的 CPU 自测
+    assert calls[2][1] == {**{k: v for k, v in common.items() if k != "device_map"},
+                           "revision": None, "device_map": "cpu"}
     with pytest.raises(ValueError, match="quantization"):
         hf_runtime.load_causal_lm("org/model", None, "int8")
 
@@ -269,9 +278,56 @@ def test_generation_arguments_match_the_previous_call_sites():
                   temperature=0.7, top_k=0)              # evaluate.py 的采样路径
     generate_text(model, tokenizer, inputs, attention, max_new_tokens=5, do_sample=True,
                   temperature=0.7)                       # RFT / 偏好数据采样路径
+    generate_text(model, tokenizer, inputs, attention, max_new_tokens=5, do_sample=True,
+                  temperature=0.6, top_p=0.95, top_k=20)  # 模型卡推荐的思考模式采样
     assert calls[0] == dict(max_new_tokens=5, do_sample=False, pad_token_id=0,
                             attention_mask=attention)
     assert calls[1] == dict(max_new_tokens=5, do_sample=True, pad_token_id=0,
                             attention_mask=attention, temperature=0.7, top_p=1.0, top_k=0)
     assert calls[2] == dict(max_new_tokens=5, do_sample=True, pad_token_id=0,
                             attention_mask=attention, temperature=0.7, top_p=1.0)
+    assert calls[3] == dict(max_new_tokens=5, do_sample=True, pad_token_id=0,
+                            attention_mask=attention, temperature=0.6, top_p=0.95, top_k=20)
+
+
+def test_thinking_mode_is_off_unless_evaluation_turns_it_on():
+    seen = []
+
+    class Recording(ThinkingTokenizer):
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True,
+                                return_tensors=None, **kwargs):
+            seen.append(kwargs.get("enable_thinking", "left-to-the-template"))
+            return super().apply_chat_template(messages, tokenize, add_generation_prompt,
+                                              return_tensors, **kwargs)
+
+    messages = record()["messages"]
+    closed = apply_chat_template(Recording(), messages, add_generation_prompt=True)
+    opened = apply_chat_template(Recording(), messages, add_generation_prompt=True,
+                                enable_thinking=True)
+    assert seen == [False, True]                      # 默认关闭；显式打开才传 True
+    assert _text(closed).endswith(ThinkingTokenizer.CLOSED)
+    assert _text(opened).endswith("<assistant><think>\n")   # Qwen3.5：提示以未闭合的 <think> 结尾
+
+    class TensorThinking(ThinkingTokenizer):
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True,
+                                return_tensors=None, **kwargs):
+            assert return_tensors == "pt"
+            return torch.tensor([super().apply_chat_template(
+                messages, tokenize, add_generation_prompt, None, **kwargs)])
+
+    inputs, _ = prompt_inputs(TensorThinking(), messages, "cpu", enable_thinking=True)
+    assert _text(inputs[0].tolist()).endswith("<think>\n")
+
+    class StrictPlain(PlainTokenizer):
+        """Qwen2.5 一类：模板没有思考开关，也不接受多余的参数。"""
+
+    apply_chat_template(StrictPlain(), messages, add_generation_prompt=True, enable_thinking=True)
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("先检查循环。\n</think>\n\nprint(1)\n", ("先检查循环。\n", "\n\nprint(1)\n", True)),
+    ("还在推理", ("还在推理", "", False)),
+    ("a</think>b</think>c", ("a", "b</think>c", True)),      # 与对话模板一致：取第一个闭合标签
+])
+def test_split_thinking_takes_the_text_after_the_first_closing_tag(text, expected):
+    assert split_thinking(text) == expected

@@ -32,6 +32,7 @@ from agentlab.benchmark.protocol import (
 from agentlab.benchmark.task_store import TaskStore
 from agentlab.training.hf_runtime import (
     generate_text, load_causal_lm, load_tokenizer, prompt_inputs, resolve_revision,
+    split_thinking,
 )
 from _shared_extract import extract_code
 
@@ -82,6 +83,8 @@ def summarize_results(results: list[dict]) -> dict:
         "task_pass_rates": task_rates,
         "failure_counts": dict(Counter(item.get("failure_type") for item in results
                                        if not item.get("strict_pass"))),
+        "n_unfinished_thinking": sum(item.get("failure_type") == "thinking_unfinished"
+                                     for item in results),
     }
 
 
@@ -144,12 +147,20 @@ def failure_type(code: str, verdict: str, details: dict) -> str | None:
     return "public_test_failure"
 
 
-def evaluate_candidate(spec, raw, task_dir, grade_dir, metadata=None):
-    fixed_code = extract_code(raw)
+def evaluate_candidate(spec, raw, task_dir, grade_dir, metadata=None, thinking=False):
+    """判分一条原始回答。思考模式下回答在 ``</think>`` 之后；额度用完时推理还没结束的
+    回答记为“推理未结束”，不算代码错误，也不进判分器。"""
+    reasoning, answer, finished = split_thinking(raw) if thinking else ("", raw, True)
+    fixed_code = extract_code(answer)
     record = dict(task_id=spec["task_id"], source_group=spec["source_group"],
                   split=spec["split"], difficulty=spec["difficulty"],
                   prompt_hash=prompt_fingerprint(spec), raw_response=raw,
-                  generated_code=fixed_code, **(metadata or {}))
+                  generated_code=fixed_code, reasoning_chars=len(reasoning.strip()),
+                  **(metadata or {}))
+    if not finished:
+        record.update(verdict="incomplete_thinking", strict_pass=False,
+                      failure_type="thinking_unfinished", grader_details={})
+        return record
     try:
         verdict, strict_pass, details = grade_one(spec, fixed_code, task_dir, grade_dir)
         record.update(verdict=verdict, strict_pass=strict_pass, grader_details=details,
@@ -223,9 +234,9 @@ def error_record(spec, repeat_index, seed, error):
                 generated_code="", grader_details={}, error=f"{type(error).__name__}: {error}")
 
 
-def tokenize_prompt(tokenizer, messages, device):
+def tokenize_prompt(tokenizer, messages, device, enable_thinking=False):
     """Normalize legacy tensor and current BatchEncoding chat-template outputs."""
-    return prompt_inputs(tokenizer, messages, device)
+    return prompt_inputs(tokenizer, messages, device, enable_thinking=enable_thinking)
 
 
 def evaluate_gpu(args, specs, task_dir, grade_dir):
@@ -284,17 +295,19 @@ def evaluate_gpu(args, specs, task_dir, grade_dir):
                     )
                 else:
                     inputs, attention = tokenize_prompt(
-                        tokenizer, build_messages(spec), model.device)
+                        tokenizer, build_messages(spec), model.device,
+                        enable_thinking=args.thinking)
                     raw, output_tokens = generate_text(
                         model, tokenizer, inputs, attention,
                         max_new_tokens=args.max_new_tokens, do_sample=args.temperature > 0,
-                        temperature=args.temperature, top_k=0)
+                        temperature=args.temperature, top_p=args.top_p, top_k=args.top_k)
                     torch.cuda.synchronize()
                     record = evaluate_candidate(spec, raw, task_dir, grade_dir, dict(
                         repeat_index=repeat_index, seed=seed,
                         generation_time_s=round(time.perf_counter() - started, 4),
                         input_tokens=inputs.shape[1], output_tokens=output_tokens,
-                        hit_token_limit=output_tokens >= args.max_new_tokens))
+                        hit_token_limit=output_tokens >= args.max_new_tokens),
+                        thinking=args.thinking)
             except Exception as error:
                 record = error_record(spec, repeat_index, seed, error)
             results.append(record)
@@ -379,6 +392,10 @@ def make_parser():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
+    parser.add_argument("--top-p", type=float, default=1.0,
+                        help="Nucleus sampling threshold; only used with --temperature > 0")
+    parser.add_argument("--top-k", type=int, default=0,
+                        help="Top-k sampling, 0 turns it off; only used with --temperature > 0")
     parser.add_argument("--quantization", choices=["nf4", "bf16"], default="nf4")
     parser.add_argument("--strategy", choices=["greedy", "best-of-n"], default="greedy",
                         help="greedy: single decode; best-of-n: sample N times, "
@@ -387,7 +404,25 @@ def make_parser():
                         help="Number of samples for --strategy best-of-n")
     parser.add_argument("--sample-temperature", type=float, default=0.7,
                         help="Temperature for best-of-n sampling phase")
+    parser.add_argument("--thinking", action=argparse.BooleanOptionalAction, default=False,
+                        help="Let the model reason in a <think> block before the answer "
+                             "(the default of Qwen3.5); only the text after </think> is graded, "
+                             "and a block that never closes counts as an unfinished answer")
     return parser
+
+
+def generation_protocol(args):
+    """协议里的生成设置。可选项取默认值时不写进去，已有报告的协议哈希不变。"""
+    generation = dict(repeats=args.repeats, seed=args.seed, temperature=args.temperature,
+                      max_new_tokens=args.max_new_tokens,
+                      quantization="api" if args.api else args.quantization,
+                      decoding="greedy" if args.temperature == 0 else "sampling",
+                      backend="api" if args.api else "transformers")
+    if args.thinking:
+        generation["thinking"] = True
+    if args.temperature > 0 and (args.top_p != 1.0 or args.top_k != 0):
+        generation.update(top_p=args.top_p, top_k=args.top_k)
+    return generation
 
 
 def main():
@@ -400,6 +435,17 @@ def main():
         args.revision = resolve_revision(args.model, args.revision)
     if args.api and args.adapter:
         parser.error("API evaluation cannot load a local adapter")
+    if args.thinking and args.api:
+        parser.error("--thinking applies to the local model; the API path is left to the provider")
+    if args.thinking and args.strategy == "best-of-n":
+        parser.error("--thinking only supports the greedy strategy")
+    if not 0 < args.top_p <= 1 or args.top_k < 0:
+        parser.error("top-p must lie in (0, 1] and top-k cannot be negative")
+    if args.top_p != 1.0 or args.top_k != 0:
+        if args.api:
+            parser.error("--top-p and --top-k apply to the local model")
+        if args.temperature == 0:
+            parser.error("--top-p and --top-k need --temperature > 0")
     specs = load_specs(args.tasks_file, split=args.split)
     if not specs:
         parser.error(f"No tasks in split {args.split!r}")
@@ -421,11 +467,7 @@ def main():
             parser.error(f"Evaluation overlaps training identities: {json.dumps(overlap, ensure_ascii=False)}")
         if args.adapter and overlap["status"] == "not_checked":
             parser.error("Held-out adapter evaluation requires --training-data or training-manifest.json")
-    generation = dict(repeats=args.repeats, seed=args.seed, temperature=args.temperature,
-                      max_new_tokens=args.max_new_tokens,
-                      quantization="api" if args.api else args.quantization,
-                      decoding="greedy" if args.temperature == 0 else "sampling",
-                      backend="api" if args.api else "transformers")
+    generation = generation_protocol(args)
     benchmark_hash = protocol_hash(specs)
     prompts = {spec["task_id"]: prompt_fingerprint(spec) for spec in specs}
     protocol = dict(schema_version=SCHEMA_VERSION, benchmark_hash=benchmark_hash,

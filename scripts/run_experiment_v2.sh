@@ -7,7 +7,7 @@ export HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 
 STAGE="${1:-all}"
 FORCE="${FORCE:-0}"
-MODEL="${MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct}"
+MODEL="${MODEL:-}"                    # 留空则用 src/agentlab/models.py 里的默认模型
 MODEL_REVISION="${MODEL_REVISION:-}"
 DEV_RATIO="${DEV_RATIO:-0.15}"
 TEST_RATIO="${TEST_RATIO:-0.15}"
@@ -18,11 +18,23 @@ EVAL_SPLIT="${EVAL_SPLIT:-dev}"
 SEED="${SEED:-42}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-2048}"
 QUANTIZATION="${QUANTIZATION:-nf4}"
-export MODEL MODEL_REVISION TRAIN_CANDIDATES DEV_CANDIDATES MAX_PER_TASK SEED MAX_NEW_TOKENS QUANTIZATION
+EXTRA_POOLS="${EXTRA_POOLS:-}"      # 可选题池，如 h3（难题）；留空就是默认的 104 题
+export MODEL_REVISION TRAIN_CANDIDATES DEV_CANDIDATES MAX_PER_TASK SEED MAX_NEW_TOKENS QUANTIZATION
+export EXTRA_POOLS
+# 启用了可选题池（里面有难题）时按难度分层划分，让难题的来源组按比例进入三个集合
+SPLIT_STRATIFY="${SPLIT_STRATIFY:-$([[ -n "$EXTRA_POOLS" ]] && echo 1 || echo 0)}"
+# 思考模式（Qwen3.5 的默认行为）。只影响 select / eval / final-eval：回答在 </think> 之后，
+# 推理会占用生成额度，所以要同时调大 MAX_NEW_TOKENS
+THINKING="${THINKING:-0}"
+EVAL_FLAGS=()
+[[ "$THINKING" != 1 ]] || EVAL_FLAGS=(--thinking)
 pyrun() {
   if command -v python >/dev/null 2>&1; then python "$@"; else python3 "$@"; fi
 }
 state() { pyrun src/agentlab/experiments/run_state.py "$@"; }
+# 默认模型只在 src/agentlab/models.py 定义一次
+MODEL="${MODEL:-$(state default-model)}"
+export MODEL
 # revision 与模型成对：换了模型却沿用旧 revision，会按旧模型的提交去拉取新模型
 if [[ -z "$MODEL_REVISION" ]]; then
   MODEL_REVISION="$(state revision "$MODEL")"
@@ -62,6 +74,13 @@ artifacts() {
   INPUTS=("$STATE_DIR/configuration.json" scripts/run_experiment_v2.sh src/agentlab/experiments/run_state.py)
   OUTPUTS=()
   case "$1" in
+    select|eval|final-eval)
+      # 思考模式不进入 run_id；打开后写进请求文件，参与这几个阶段的回执校验，
+      # 关闭时不写，默认流程的回执与改动前完全相同
+      [[ "$THINKING" != 1 ]] || printf 'thinking=1\nmax_new_tokens=%s\n' "$MAX_NEW_TOKENS" \
+        > "$STATE_DIR/eval-request.txt" ;;
+  esac
+  case "$1" in
     pools)
       INPUTS+=(scripts/export_pilot_tasks.py scripts/export_tasks_v2.py src/agentlab/benchmark)
       OUTPUTS=("$POOL_DIR/combined.jsonl") ;;
@@ -70,6 +89,8 @@ artifacts() {
       # 改了比例不能静默复用按旧比例冻结的划分
       printf 'seed=%s\ndev_ratio=%s\ntest_ratio=%s\n' "$SEED" "$DEV_RATIO" "$TEST_RATIO" \
         > "$STATE_DIR/split-request.txt"
+      # 是否分层同样不进入 run_id，但改变了就不能复用按另一种方式冻结的划分
+      [[ "$SPLIT_STRATIFY" != 1 ]] || echo 'stratify=1' >> "$STATE_DIR/split-request.txt"
       INPUTS+=("$STATE_DIR/split-request.txt" "$POOL_DIR/combined.jsonl" scripts/prepare_data.py
                src/agentlab/training/preparation.py)
       OUTPUTS=("$EXP_DIR/tasks.jsonl" "$EXP_DIR/split-manifest.json" "$EXP_DIR/audit-manifest.json") ;;
@@ -89,10 +110,12 @@ artifacts() {
     select)
       INPUTS+=("$EXP_DIR/tasks.jsonl" "$CKPT_DIR" scripts/select_checkpoint.py scripts/evaluate.py
                scripts/_shared_extract.py scripts/compare.py src/agentlab/benchmark)
+      [[ "$THINKING" != 1 ]] || INPUTS+=("$STATE_DIR/eval-request.txt")
       OUTPUTS=("$SELECTION_DIR") ;;
     eval|final-eval)
       INPUTS+=("$EXP_DIR/tasks.jsonl" "$CKPT_DIR" "$SELECTION_DIR"
                scripts/evaluate.py scripts/_shared_extract.py scripts/compare.py src/agentlab/benchmark)
+      [[ "$THINKING" != 1 ]] || INPUTS+=("$STATE_DIR/eval-request.txt")
       local split=dev
       [[ "$1" != final-eval ]] || split=test
       OUTPUTS=("$EVAL_OUTPUT_DIR/$split/base.json" "$EVAL_OUTPUT_DIR/$split/selected.json"
@@ -102,7 +125,7 @@ artifacts() {
 
 run_guarded() {
   local name="$1"; shift
-  if [[ "$name" != deps && "$name" != env ]]; then
+  if [[ "$name" != deps && "$name" != env && "$name" != smoke ]]; then
     artifacts "$name"
     if [[ "$FORCE" != 1 ]] && state check --receipt "$STATE_DIR/$name.json" \
       --inputs "${INPUTS[@]}" --outputs "${OUTPUTS[@]}"; then
@@ -112,10 +135,18 @@ run_guarded() {
   fi
   echo "── [$name] 开始"
   ( "$@" ) 2>&1 | tee "$LOG_DIR/$name-$RUN_TAG.log"
-  if [[ "$name" != deps && "$name" != env ]]; then
+  if [[ "$name" != deps && "$name" != env && "$name" != smoke ]]; then
     state mark --receipt "$STATE_DIR/$name.json" --inputs "${INPUTS[@]}" --outputs "${OUTPUTS[@]}"
   fi
   echo "── [$name] 完成"
+}
+
+stage_smoke() {
+  # 在付费采集和长时间训练之前，把只能在 GPU 上验证的环节跑一遍：
+  # NF4 量化、LoRA、一步训练、一次生成
+  pyrun scripts/smoke_model.py --model "$MODEL" --revision "$MODEL_REVISION" \
+    --quantization "$QUANTIZATION" --lora-r "${LORA_R:-16}" --lora-alpha "${LORA_ALPHA:-32}" \
+    --max-length "${MAX_LENGTH:-2048}"
 }
 
 require_empty() {
@@ -130,20 +161,31 @@ PY
 
 stage_deps() {
   local extra
-  extra="$(state install-extra "$MODEL")"     # train（Qwen2.5）| train-qwen35（Qwen3.5）
+  extra="$(state install-extra "$MODEL")"     # train（默认，含 Qwen3.5）| train-qwen25（Qwen2.5 系列）
   pyrun -m pip install -e ".[dev,${extra},api]"
   pyrun -m pip check
   pyrun -c 'import torch, transformers, peft, bitsandbytes, accelerate, openai; print("训练依赖导入成功")'
 }
 
 stage_env() {
-  # 下载权重之前先确认架构受支持（Qwen3.5 需要 transformers >= 5.2.0）
+  # 下载权重之前先确认架构受支持（Qwen3.5 需要 transformers >= 5.2.0），再用真实
+  # tokenizer 渲染一次 chat template：transformers 5.x 要求 jinja2 >= 3.1.6，
+  # 现成的环境里常常是旧版本，在这里报错比等到训练时才发现好
   pyrun - "$MODEL" "$MODEL_REVISION" <<'PY'
 import sys
 sys.path.insert(0, "src")
 from agentlab.training import hf_runtime
-hf_runtime.assert_model_supported(sys.argv[1], sys.argv[2] or None)
-print(f"模型架构检查通过: {sys.argv[1]} @ {sys.argv[2] or 'main'}")
+model, revision = sys.argv[1], sys.argv[2] or None
+hf_runtime.assert_model_supported(model, revision)
+print(f"模型架构检查通过: {model} @ {revision or 'main'}")
+try:
+    tokenizer = hf_runtime.load_tokenizer(model, revision)
+    tokens = hf_runtime.apply_chat_template(
+        tokenizer, [{"role": "user", "content": "ping"}], add_generation_prompt=True)
+except ImportError as error:
+    raise SystemExit(f"chat template 无法渲染: {error}\n"
+                     '在当前环境执行: python -m pip install -U "jinja2>=3.1.6"')
+print(f"chat template 渲染正常（{len(tokens)} 个 token）")
 PY
   # 判分隔离的实际情况：landlock 不可用时候选代码只在 rlimit + 清洁环境下运行
   pyrun -m agentlab doctor | grep -E '^sandbox\.'
@@ -186,15 +228,17 @@ stage_pools() {
 }
 
 stage_split() {
+  local stratify=()
+  [[ "$SPLIT_STRATIFY" != 1 ]] || stratify=(--stratify)
   if [[ -f "$EXP_DIR/tasks.jsonl" && -f "$EXP_DIR/split-manifest.json" && -f "$EXP_DIR/audit-manifest.json" ]]; then
     state validate-split --directory "$EXP_DIR" --pool "$POOL_DIR/combined.jsonl" \
-      --seed "$SEED" --dev-ratio "$DEV_RATIO" --test-ratio "$TEST_RATIO"
+      --seed "$SEED" --dev-ratio "$DEV_RATIO" --test-ratio "$TEST_RATIO" "${stratify[@]}"
     echo "已核对冻结任务与当前池一致：$EXP_DIR"
     return 0
   fi
   require_empty "$EXP_DIR" EXP_DIR
   pyrun scripts/prepare_data.py --tasks-file "$POOL_DIR/combined.jsonl" --split-tasks \
-    --output-dir "$EXP_DIR" --dev-ratio "$DEV_RATIO" --test-ratio "$TEST_RATIO" --seed "$SEED"
+    --output-dir "$EXP_DIR" --dev-ratio "$DEV_RATIO" --test-ratio "$TEST_RATIO" --seed "$SEED" "${stratify[@]}"
 }
 
 collection_status() {
@@ -273,7 +317,8 @@ stage_select() {
   validate_checkpoint
   require_empty "$SELECTION_DIR" EVAL_OUTPUT_DIR
   pyrun scripts/select_checkpoint.py --checkpoint-root "$CKPT_DIR" --tasks-file "$EXP_DIR/tasks.jsonl" \
-    --output "$SELECTION_DIR" --quantization "$QUANTIZATION" --max-new-tokens "$MAX_NEW_TOKENS" --seed "$SEED"
+    --output "$SELECTION_DIR" --quantization "$QUANTIZATION" --max-new-tokens "$MAX_NEW_TOKENS" --seed "$SEED" \
+    "${EVAL_FLAGS[@]}"
 }
 
 stage_eval() {
@@ -309,11 +354,13 @@ PY
   else
     pyrun scripts/evaluate.py --tasks-file "$EXP_DIR/tasks.jsonl" --split "$split" \
       --model "$MODEL" --revision "$MODEL_REVISION" --training-data "$CKPT_DIR/training-manifest.json" \
-      --quantization "$QUANTIZATION" --temperature 0 --seed "$SEED" --max-new-tokens "$MAX_NEW_TOKENS" --output "$output/base.json"
+      --quantization "$QUANTIZATION" --temperature 0 --seed "$SEED" --max-new-tokens "$MAX_NEW_TOKENS" \
+      --output "$output/base.json" "${EVAL_FLAGS[@]}"
     if [[ -n "$adapter" ]]; then
       pyrun scripts/evaluate.py --tasks-file "$EXP_DIR/tasks.jsonl" --split "$split" \
         --model "$MODEL" --revision "$MODEL_REVISION" "${adapter_args[@]}" --training-data "$CKPT_DIR/training-manifest.json" \
-        --quantization "$QUANTIZATION" --temperature 0 --seed "$SEED" --max-new-tokens "$MAX_NEW_TOKENS" --output "$output/selected.json"
+        --quantization "$QUANTIZATION" --temperature 0 --seed "$SEED" --max-new-tokens "$MAX_NEW_TOKENS" \
+        --output "$output/selected.json" "${EVAL_FLAGS[@]}"
     else
       cp "$output/base.json" "$output/selected.json"
     fi
@@ -329,6 +376,7 @@ if [[ "$EVAL_SPLIT" != dev && "$STAGE" != final-eval ]]; then
 fi
 case "$STAGE" in
   env) run_guarded env stage_env ;;
+  smoke) run_guarded smoke stage_smoke ;;
   deps) run_guarded deps stage_deps ;;
   pools) run_guarded pools stage_pools ;;
   split) run_guarded split stage_split ;;
@@ -341,6 +389,7 @@ case "$STAGE" in
   all)
     run_guarded deps stage_deps
     run_guarded env stage_env
+    run_guarded smoke stage_smoke
     run_guarded pools stage_pools
     run_guarded split stage_split
     run_guarded collect stage_collect
@@ -351,5 +400,5 @@ case "$STAGE" in
     echo "dev 流程完成。选择结果：$SELECTION_DIR/selection.json"
     echo '锁定配置后，保持同样环境变量，单独运行 final-eval 评估 test。'
     ;;
-  *) echo '未知阶段：可选 deps env pools split collect prepare train select eval final-eval all' >&2; exit 2 ;;
+  *) echo '未知阶段：可选 deps env smoke pools split collect prepare train select eval final-eval all' >&2; exit 2 ;;
 esac

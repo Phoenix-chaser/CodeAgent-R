@@ -290,9 +290,21 @@ def resolve_mode() -> str:
     if requested == "required":
         raise UnsupportedSandbox(
             f"kernel sandbox required but unavailable: {probe.reason}")
-    print(f"警告：Landlock 不可用（{probe.reason}），候选代码只在 rlimit + 清洁环境下执行；"
-          "文件系统与网络未受限制。", file=sys.stderr, flush=True)
+    _warn_degraded(probe.reason)
     return "process"
+
+
+_warned_reason: str | None = None
+
+
+def _warn_degraded(reason: str) -> None:
+    """降级提示每个进程只打印一次：一次评测要判几百次分，每次都提示会淹没日志。"""
+    global _warned_reason
+    if _warned_reason == reason:
+        return
+    _warned_reason = reason
+    print(f"警告：Landlock 不可用（{reason}），候选代码只在 rlimit + 清洁环境下执行；"
+          "文件系统与网络未受限制。", file=sys.stderr, flush=True)
 
 
 _SYSTEM_LIBRARY_DIRS = ("/lib", "/lib64", "/usr/lib", "/usr/lib64", "/usr/local/lib")

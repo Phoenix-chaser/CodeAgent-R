@@ -8,6 +8,7 @@ import sys
 import pytest
 
 from agentlab.experiments.run_state import check_receipt, mark_receipt, validate_split
+from agentlab.models import DEFAULT_MODEL, default_revision
 from agentlab.training.preparation import content_hash
 
 
@@ -74,6 +75,19 @@ def test_frozen_split_is_checked_against_the_requested_ratios(tmp_path):
         validate_split(tmp_path, None, 42, 0.20, 0.15)
 
 
+def test_frozen_split_must_be_stratified_when_requested(tmp_path):
+    tasks = [{"task_id": "case", "split": "train"}]
+    (tmp_path / "tasks.jsonl").write_text(json.dumps(tasks[0]))
+    manifest = {"tasks_sha256": content_hash(tasks), "seed": 42, "dev_ratio": 0.2, "test_ratio": 0.2}
+    (tmp_path / "split-manifest.json").write_text(json.dumps(manifest))
+    validate_split(tmp_path, None, 42, 0.2, 0.2)
+    with pytest.raises(ValueError, match="not stratified"):
+        validate_split(tmp_path, None, 42, 0.2, 0.2, stratify=True)
+    stratified = {**manifest, "stratified": {"default": {"groups": 1}}}
+    (tmp_path / "split-manifest.json").write_text(json.dumps(stratified))
+    validate_split(tmp_path, None, 42, 0.2, 0.2, stratify=True)
+
+
 def test_incomplete_frozen_audit_is_rejected(tmp_path):
     tasks = [{"task_id": "case", "split": "train"}]
     (tmp_path / "tasks.jsonl").write_text(json.dumps(tasks[0]))
@@ -96,7 +110,10 @@ def runner(tmp_path):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / relative, destination)
     for relative in ("scripts/train_sft.py", "src/agentlab/training/hf_sft.py",
-                     "scripts/collect_data.py", "src/agentlab/benchmark/protocol.py"):
+                     "scripts/collect_data.py", "src/agentlab/benchmark/protocol.py",
+                     # 选型阶段的回执要核对这几个输入存在
+                     "scripts/select_checkpoint.py", "scripts/evaluate.py",
+                     "scripts/_shared_extract.py", "scripts/compare.py"):
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text("stub")
@@ -128,6 +145,8 @@ if args[0] == 'scripts/train_sft.py':
         for name in ('training-manifest.json', 'training-log.jsonl', 'checkpoint-index.json',
                      'adapter/adapter_model.safetensors'):
             (output / name).write_text('{}')
+elif args[0] == 'scripts/smoke_model.py':
+    raise SystemExit(int(os.environ.get('FAKE_SMOKE_STATUS', '0')))   # needs a GPU; args are traced
 elif args[0] == 'scripts/collect_data.py':
     output = pathlib.Path(argument('--output'))
     if '--status-only' in args:
@@ -135,6 +154,10 @@ elif args[0] == 'scripts/collect_data.py':
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('{}\\n')
     output.with_suffix('.manifest.json').write_text('{}')
+elif args[0] == 'scripts/select_checkpoint.py':
+    output = pathlib.Path(argument('--output'))           # needs a GPU; args are traced
+    output.mkdir(parents=True)
+    (output / 'selection.json').write_text('{}')
 else:
     raise SystemExit('unexpected fake invocation: ' + str(args))
 ''', encoding="utf-8")
@@ -178,13 +201,36 @@ def test_same_training_resumes_but_different_checkpoint_does_not_skip(runner):
     assert len(list(root.glob(".state/experiments/*/train.json"))) == 2
 
 
-@pytest.mark.parametrize("setting", [{"LR": "1e-5"}, {"MODEL_REVISION": "different"}, {"MAX_PER_TASK": "2"}])
+@pytest.mark.parametrize("setting", [{"LR": "1e-5"}, {"MODEL_REVISION": "different"}, {"MAX_PER_TASK": "2"},
+                                    {"EXTRA_POOLS": "h3"}])
 def test_configuration_change_gets_separate_state_and_checkpoint(runner, setting):
     root, _, invoke, trace = runner
     assert invoke("train").returncode == 0
     assert invoke("train", **setting).returncode == 0
     assert len(trace()) == 4
     assert len(list(root.glob("checkpoints/*/adapter"))) == 2
+
+
+def test_default_model_is_qwen35_with_its_pinned_revision(runner):
+    """不设置 MODEL 时跑的是 Qwen3.5，revision 取自 src/agentlab/models.py。"""
+    root, _, invoke, trace = runner
+    assert invoke("train").returncode == 0
+    command = trace()[0]
+    assert command[command.index("--model") + 1] == "Qwen/Qwen3.5-9B"
+    assert command[command.index("--revision") + 1] == "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+
+
+def test_smoke_stage_checks_the_default_model_before_any_paid_or_long_stage(runner):
+    root, _, invoke, trace = runner
+    assert invoke("smoke").returncode == 0
+    command = trace()[0]
+    assert command[command.index("--model") + 1] == "Qwen/Qwen3.5-9B"
+    assert command[command.index("--revision") + 1] == "c202236235762e1c871ad0ccb60c8ee5ba337b9a"
+    assert command[command.index("--quantization") + 1] == "nf4"
+    # a failed smoke test stops `all` before pools/split/collect are reached
+    result = invoke("all", FAKE_SMOKE_STATUS="1")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert not any(entry[0] == "scripts/collect_data.py" for entry in trace())
 
 
 def test_model_and_revision_are_resolved_as_a_pair(runner):
@@ -276,3 +322,35 @@ def test_collection_status_cli_requires_no_api_key(tmp_path, verdict, expected_c
     status = json.loads(result.stdout)
     assert status["slots"] == status["recorded"] == 1
     assert status["retryable"] == int(expected_code == 3)
+
+
+def _checkpoint(root, name):
+    """一个通过校验的 checkpoint 目录：选型阶段只读它的训练记录。"""
+    checkpoint = root / name
+    checkpoint.mkdir()
+    (checkpoint / "training-manifest.json").write_text(json.dumps({
+        "status": "complete", "model": DEFAULT_MODEL, "revision": default_revision(DEFAULT_MODEL),
+    }), encoding="utf-8")
+    return str(checkpoint)
+
+
+def test_thinking_mode_reaches_selection_and_its_receipt(runner):
+    """THINKING=1 时选型带上 --thinking，并写进请求文件参与回执校验。"""
+    root, _, invoke, trace = runner
+    checkpoint = _checkpoint(root, "ckpt")
+    result = invoke("select", THINKING="1", MAX_NEW_TOKENS="8192", CKPT_DIR=checkpoint)
+    assert result.returncode == 0, result.stdout + result.stderr
+    command = trace()[-1]
+    assert command[-1] == "--thinking" and command[command.index("--max-new-tokens") + 1] == "8192"
+    request = list(root.glob(".state/experiments/*/eval-request.txt"))
+    assert [path.read_text() for path in request] == ["thinking=1\nmax_new_tokens=8192\n"]
+    assert invoke("select", THINKING="1", MAX_NEW_TOKENS="8192", CKPT_DIR=checkpoint).returncode == 0
+    assert len(trace()) == 1                                   # 回执有效，第二次直接跳过
+
+
+def test_default_evaluation_is_untouched_by_the_thinking_switch(runner):
+    """不设 THINKING 时选型命令与改动前相同，也不产生请求文件。"""
+    root, _, invoke, trace = runner
+    assert invoke("select", CKPT_DIR=_checkpoint(root, "ckpt")).returncode == 0
+    assert "--thinking" not in trace()[-1]
+    assert not list(root.glob(".state/experiments/*/eval-request.txt"))

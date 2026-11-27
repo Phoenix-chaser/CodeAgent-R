@@ -83,6 +83,8 @@ def write_adapter(root, epoch=1, indexed=True):
     adapter.mkdir(parents=True)
     (adapter / "adapter_model.safetensors").write_bytes(b"verified-weights")
     (adapter / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+    # 真的适配器目录（PEFT 写的）都有这一份；scripts/rft_vllm_eval.sh 靠它认出一个目录是适配器
+    (adapter / "adapter_config.json").write_text('{"peft_type": "LORA", "r": 32}\n', encoding="utf-8")
     hashes = {file.name: hashlib.sha256(file.read_bytes()).hexdigest()
               for file in adapter.iterdir()}
     manifest = {"best_epoch": epoch, "checkpoint_epoch": epoch, "adapter_files_sha256": hashes}

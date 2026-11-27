@@ -26,8 +26,8 @@ current_update:
 review_2026_11_23:
   date: '2026-11-23'
   record: docs/REVIEW-2026-11-23.md
-  offline_tests: 536 passed
-  test_seconds: 49.9
+  offline_tests: 542 passed（安装 peft）；未安装 peft 时 538 passed, 1 skipped
+  test_seconds: 110.1
   command: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python3 -m pytest tests -q -p no:cacheprovider
   lint: ruff check . 通过
   grader:
@@ -46,6 +46,8 @@ review_2026_11_23:
     bundles_published: 0
   ci: .github/workflows/checks.yml
   supported_models: [Qwen/Qwen2.5-Coder-7B-Instruct, Qwen/Qwen3.5-9B]
+  default_model: Qwen/Qwen3.5-9B          # 已发表数字仍来自 Qwen2.5-Coder-7B-Instruct
+  smoke_stage: bash scripts/run_experiment_v2.sh smoke；all 在付费采集前运行
   gpu_validation_this_round: not_run
   environment: Linux / Python 3.14.4 / torch 2.14.1+cpu / transformers 5.22.1 / Landlock ABI 8
 historical_84_task_pilot:

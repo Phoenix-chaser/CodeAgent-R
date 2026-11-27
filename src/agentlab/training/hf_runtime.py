@@ -5,9 +5,10 @@
 量化与加载代码，模型家族的差异没有地方集中处理。现在差异都在这里：
 
 - **思考模式**：Qwen3 起的 chat template 默认在生成提示后追加 ``<think>``，
-  模型会先输出思考再给答案。训练时前缀相减会对不上，评测时 ``</think>`` 不是
-  特殊 token、不会被过滤，思考内容可能占满生成额度。这里统一关闭；对不含该
-  变量的模板（如 Qwen2.5）不传任何额外参数，行为逐 token 不变。
+  模型会先输出思考再给答案。训练时前缀相减会对不上，``</think>`` 也不是特殊
+  token、不会被过滤，思考内容可能占满生成额度。所以这里默认关闭；评测可以
+  显式打开（``enable_thinking=True``），再用 ``split_thinking`` 取出 ``</think>``
+  之后的回答。对不含该变量的模板（如 Qwen2.5）不传任何额外参数，行为逐 token 不变。
 - **LoRA 目标**：按模型里真实存在的模块选择。Qwen3.5 每 4 层有 3 层线性
   注意力，投影名是 ``in_proj_qkv`` / ``in_proj_z`` / ``out_proj``，Qwen2.5 的
   列表一个都命不中。
@@ -19,13 +20,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentlab.models import TRANSFORMERS_MINIMUM, default_revision, needs_new_transformers
+from agentlab.models import default_revision, minimum_transformers
 
 # Qwen2.5 的全部线性层；与改动前的列表逐项相同
 BASE_LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj",
                      "gate_proj", "up_proj", "down_proj")
-# 线性注意力层（Gated DeltaNet）的混合投影。in_proj_a / in_proj_b 输出维度只有
-# 头数，不挂 LoRA。
+# 线性注意力层（Gated DeltaNet）的混合投影，Qwen2.5 没有这些模块。in_proj_a /
+# in_proj_b 的输出维度只有头数，不挂 LoRA。
 HYBRID_LORA_TARGETS = ("in_proj_qkv", "in_proj_z", "out_proj")
 QUANTIZATIONS = ("nf4", "bf16")
 
@@ -36,13 +37,28 @@ def thinking_capable(tokenizer: Any) -> bool:
 
 
 def apply_chat_template(tokenizer: Any, messages: list[dict], *,
-                        add_generation_prompt: bool,
-                        return_tensors: Any = None) -> Any:
-    """项目内唯一的 chat template 调用入口：思考模式一律关闭。"""
-    disable = {"enable_thinking": False} if thinking_capable(tokenizer) else {}
+                        add_generation_prompt: bool, return_tensors: Any = None,
+                        enable_thinking: bool = False) -> Any:
+    """项目内唯一的 chat template 调用入口：思考模式默认关闭，评测显式要求时才打开。
+
+    打开后提示以 ``<think>`` 结尾，模型先输出推理、再输出 ``</think>``、最后才是回答。
+    """
+    switch = {"enable_thinking": enable_thinking} if thinking_capable(tokenizer) else {}
     return tokenizer.apply_chat_template(
         messages, tokenize=True, add_generation_prompt=add_generation_prompt,
-        return_tensors=return_tensors, **disable)
+        return_tensors=return_tensors, **switch)
+
+
+def split_thinking(text: str) -> tuple[str, str, bool]:
+    """把思考模式的输出拆成（推理内容，正式回答，推理是否结束）。
+
+    回答取第一个 ``</think>`` 之后的部分，与 Qwen3.5 的对话模板一致；
+    没有出现 ``</think>`` 说明生成额度用完时推理还没结束，没有可判分的回答。
+    """
+    if "</think>" not in text:
+        return text, "", False
+    reasoning, answer = text.split("</think>", 1)
+    return reasoning, answer, True
 
 
 def lora_targets_for(model: Any) -> list[str]:
@@ -62,7 +78,7 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 def check_version(model_type: str, transformers_version: str) -> None:
     """架构比已安装的 transformers 新时，给出版本要求而不是模糊的报错。"""
-    minimum = TRANSFORMERS_MINIMUM.get(model_type)
+    minimum = minimum_transformers(model_type)
     if minimum and _version_tuple(transformers_version) < minimum:
         required = ".".join(str(part) for part in minimum)
         raise RuntimeError(
@@ -78,11 +94,12 @@ def assert_model_supported(model: str, revision: str | None = None) -> None:
     try:
         config = AutoConfig.from_pretrained(model, revision=revision, trust_remote_code=False)
     except ValueError as error:
-        if "does not recognize" in str(error) and needs_new_transformers(model):
-            minimum = ".".join(str(part) for part in TRANSFORMERS_MINIMUM["qwen3.5"])
+        if "does not recognize" in str(error):
             raise RuntimeError(
                 f"transformers {transformers.__version__} does not know the architecture of "
-                f"{model}; install '.[train-qwen35]' (transformers >= {minimum})") from error
+                f"{model}. Update transformers in this environment; Qwen3.5 needs 5.2.0 or "
+                "later. A fresh environment gets the right versions from '.[dev,train,api]'."
+            ) from error
         raise
     check_version(config.model_type, transformers.__version__)
 
@@ -119,13 +136,23 @@ def quantization_config(quantization: str):
 
 
 def load_causal_lm(model: str, revision: str | None = None,
-                   quantization: str = "nf4") -> Any:
-    """bf16 权重放在 cuda:0，按需 NF4 量化，sdpa 注意力。"""
+                   quantization: str = "nf4", device: str | None = None) -> Any:
+    """bf16 权重放在 cuda:0，按需 NF4 量化，sdpa 注意力。
+
+    ``device`` 只给冒烟测试在 CPU 上自测用（例如 ``"cpu"``）；bitsandbytes 的
+    量化需要 CUDA，CPU 上只能用 ``'bf16'``。
+    """
     import torch
     from transformers import AutoModelForCausalLM
 
     assert_model_supported(model, revision)
-    options = dict(revision=revision, device_map={"": 0}, torch_dtype=torch.bfloat16,
+    if device is None:
+        placement = {"": 0}
+    elif device.startswith("cuda"):
+        placement = {"": int(device.split(":")[1] or 0)}
+    else:
+        placement = device
+    options = dict(revision=revision, device_map=placement, torch_dtype=torch.bfloat16,
                    trust_remote_code=False, attn_implementation="sdpa")
     bnb = quantization_config(quantization)
     if bnb is not None:
@@ -133,14 +160,15 @@ def load_causal_lm(model: str, revision: str | None = None,
     return AutoModelForCausalLM.from_pretrained(model, **options)
 
 
-def prompt_inputs(tokenizer: Any, messages: list[dict], device) -> tuple[Any, Any]:
+def prompt_inputs(tokenizer: Any, messages: list[dict], device, *,
+                  enable_thinking: bool = False) -> tuple[Any, Any]:
     """把提示转成模型输入。兼容返回张量和 BatchEncoding 的 transformers 版本。"""
     from collections.abc import Mapping
 
     import torch
 
     encoded = apply_chat_template(tokenizer, messages, add_generation_prompt=True,
-                                  return_tensors="pt")
+                                  return_tensors="pt", enable_thinking=enable_thinking)
     if isinstance(encoded, Mapping):
         inputs = encoded["input_ids"].to(device)
         attention = encoded.get("attention_mask")
@@ -153,14 +181,14 @@ def prompt_inputs(tokenizer: Any, messages: list[dict], device) -> tuple[Any, An
 
 def generate_text(model: Any, tokenizer: Any, inputs, attention, *, max_new_tokens: int,
                   do_sample: bool, temperature: float | None = None,
-                  top_k: int | None = None) -> tuple[str, int]:
+                  top_k: int | None = None, top_p: float | None = None) -> tuple[str, int]:
     """单条序列生成，返回 (去掉特殊 token 的文本, 生成的 token 数)。"""
     import torch
 
     generation = dict(max_new_tokens=max_new_tokens, do_sample=do_sample,
                       pad_token_id=tokenizer.pad_token_id)
     if do_sample:
-        generation.update(temperature=temperature, top_p=1.0)
+        generation.update(temperature=temperature, top_p=1.0 if top_p is None else top_p)
         if top_k is not None:
             generation["top_k"] = top_k
     with torch.inference_mode():

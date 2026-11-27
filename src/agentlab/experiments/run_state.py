@@ -83,6 +83,10 @@ def initialize():
         'REVALIDATE_STALE': '0',
     }
     config.update({key: env.get(key, default) for key, default in defaults.items()})
+    # 可选题池（EXTRA_POOLS）只在启用时进入指纹：默认基准的运行目录不因新增题池而改变
+    extra_pools = env.get('EXTRA_POOLS', '').split()
+    if extra_pools:
+        config['EXTRA_POOLS'] = ' '.join(extra_pools)
     # revision 与模型成对：没有显式指定时用该模型已核对的固定版本，
     # 这样换了模型却沿用旧 revision 的情况不会悄悄发生
     if not config['MODEL_REVISION']:
@@ -109,7 +113,7 @@ def initialize():
     print('\t'.join(values))
 
 
-def validate_split(directory, pool, seed=None, dev_ratio=0.15, test_ratio=0.15):
+def validate_split(directory, pool, seed=None, dev_ratio=0.15, test_ratio=0.15, stratify=False):
     """与请求的 seed 和比例比较；默认值是阶段脚本自己的默认划分。"""
     directory = Path(directory)
     frozen = [json.loads(line) for line in
@@ -121,6 +125,8 @@ def validate_split(directory, pool, seed=None, dev_ratio=0.15, test_ratio=0.15):
                              or manifest.get('dev_ratio') != dev_ratio
                              or manifest.get('test_ratio') != test_ratio):
         raise ValueError('Frozen split configuration differs; use a new EXP_DIR')
+    if stratify and not manifest.get('stratified'):
+        raise ValueError('Frozen split was not stratified; use a new EXP_DIR')
     audit_path = directory / 'audit-manifest.json'
     if audit_path.exists():
         audit = json.loads(audit_path.read_text(encoding='utf-8'))
@@ -141,6 +147,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('init')
+    sub.add_parser('default-model', help='stdlib lookup used by the stage script')
     for name, argument in (('revision', 'model'), ('install-extra', 'model')):
         child = sub.add_parser(name, help='stdlib lookup used by the stage script')
         child.add_argument(argument)
@@ -155,16 +162,20 @@ def main(argv=None):
     child.add_argument('--seed', type=int)
     child.add_argument('--dev-ratio', type=float, default=0.15)
     child.add_argument('--test-ratio', type=float, default=0.15)
+    child.add_argument('--stratify', action='store_true')
     args = parser.parse_args(argv)
     try:
         if args.command == 'init':
             initialize()
+        elif args.command == 'default-model':
+            print(DEFAULT_MODEL)
         elif args.command == 'revision':
             print(default_revision(args.model) or '')
         elif args.command == 'install-extra':
             print(install_extra(args.model))
         elif args.command == 'validate-split':
-            validate_split(args.directory, args.pool, args.seed, args.dev_ratio, args.test_ratio)
+            validate_split(args.directory, args.pool, args.seed, args.dev_ratio, args.test_ratio,
+                           stratify=args.stratify)
         elif args.command == 'mark':
             mark_receipt(args.receipt, args.inputs, args.outputs)
         else:

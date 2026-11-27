@@ -77,6 +77,31 @@ def test_frozen_split_reproducible_grouped_and_duplicate_safe():
         freeze_splits(specs)
 
 
+def test_stratified_split_gives_each_stratum_its_proportional_share():
+    specs = [independent_spec(index) for index in range(20)]
+    for spec in specs[14:]:
+        spec["stratum"] = "hard"
+    frozen, manifest = freeze_splits(specs, 42, 0.2, 0.2, stratify=True)
+    assert freeze_splits(specs, 42, 0.2, 0.2, stratify=True) == (frozen, manifest)
+    # 六个难题来源组按比例分到 4 / 1 / 1，其余十四个分到 8 / 3 / 3；三个集合的总数与不分层时相同
+    assert manifest["stratified"] == {"default": {"groups": 14, "train": 8, "dev": 3, "test": 3},
+                                      "hard": {"groups": 6, "train": 4, "dev": 1, "test": 1}}
+    assert manifest["task_counts"] == freeze_splits(specs, 42, 0.2, 0.2)[1]["task_counts"]
+    # 一个来源组的题必须在同一层
+    twin = {**specs[3], "task_id": "independent_3twin"}
+    specs[3]["stratum"] = "hard"             # 同组的另一道题没有声明层
+    with pytest.raises(ValueError, match="crosses strata"):
+        freeze_splits([*specs, twin], 42, 0.2, 0.2, stratify=True)
+
+
+def test_stratify_flag_changes_nothing_for_a_uniform_pool():
+    specs = [independent_spec(index) for index in range(10)]
+    for spec in specs[7:]:
+        spec["difficulty"] = "L3"          # 难度标注不是层的依据
+    assert freeze_splits(specs, stratify=True) == freeze_splits(specs)
+    assert "stratified" not in freeze_splits(specs, stratify=True)[1]
+
+
 def test_preparation_deduplicates_ast_and_rejects_stale_or_heldout_data():
     specs = [independent_spec(index) for index in range(3)]
     specs[1]["split"] = "dev"

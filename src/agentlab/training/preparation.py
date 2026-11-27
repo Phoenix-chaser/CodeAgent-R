@@ -33,8 +33,50 @@ def reject_legacy_tasks(specs: list[dict]) -> None:
             raise ValueError(f"{spec['task_id']}: legacy benchmark is diagnostic only; supply independent tasks")
 
 
+def _stratum_of(spec: dict) -> str:
+    """任务用 ``stratum`` 字段声明自己属于哪一层（例如难题池）；没有声明的都在默认层。"""
+    return spec.get("stratum") or "default"
+
+
+def _stratified_mapping(groups: list[str], strata: dict[str, str], seed: int,
+                        dev_count: int, test_count: int) -> tuple[dict[str, str], dict]:
+    """每个层拿到与它的大小成正比的 dev / test 组数，然后各层分别打乱。
+
+    比例的整数部分先分下去，余数按小数部分从大到小补；每层至少留一组给 train。
+    一层只有一组时无法再分，这时总数会略少于请求的组数，manifest 里如实记录。
+    """
+    sizes = Counter(strata[group] for group in groups)
+    counts = {name: [size, 0, 0] for name, size in sizes.items()}     # 组数、dev 组数、test 组数
+    for slot, total in ((1, dev_count), (2, test_count)):
+        exact = {name: size * total / len(groups) for name, size in sizes.items()}
+        for name in counts:
+            counts[name][slot] = int(exact[name])
+        left = total - sum(counts[name][slot] for name in counts)
+        order = sorted(counts, key=lambda name: (exact[name] - int(exact[name]), name), reverse=True)
+        while left > 0:
+            ready = [name for name in order if counts[name][0] - sum(counts[name][1:]) >= 2]
+            if not ready:
+                break
+            counts[ready[0]][slot] += 1
+            order.remove(ready[0])
+            left -= 1
+    mapping = {}
+    for name in sorted(counts):
+        members = sorted(group for group in groups if strata[group] == name)
+        random.Random(f"{seed}:{name}").shuffle(members)
+        _, dev, test = counts[name]
+        for index, group in enumerate(members):
+            mapping[group] = "dev" if index < dev else "test" if index < dev + test else "train"
+    summary = {name: {"groups": size, "train": size - dev - test, "dev": dev, "test": test}
+               for name, (size, dev, test) in counts.items()}
+    return mapping, summary
+
+
 def freeze_splits(specs: list[dict], seed: int = 42,
-                  dev_ratio: float = 0.15, test_ratio: float = 0.15) -> tuple[list[dict], dict]:
+                  dev_ratio: float = 0.15, test_ratio: float = 0.15, *,
+                  stratify: bool = False) -> tuple[list[dict], dict]:
+    """按来源组冻结划分。``stratify`` 让带 ``stratum`` 字段的来源组（难题池）按比例进入三个集合，
+    而不是全部听凭一次打乱；只有一层时结果与不分层的划分完全相同。"""
     validate_specs(specs)
     reject_legacy_tasks(specs)
     if not 0 < dev_ratio < 1 or not 0 < test_ratio < 1 or dev_ratio + test_ratio >= 1:
@@ -42,14 +84,25 @@ def freeze_splits(specs: list[dict], seed: int = 42,
     groups = sorted({spec["source_group"] for spec in specs})
     if len(groups) < 3:
         raise ValueError("at least three independent source groups are required")
-    random.Random(seed).shuffle(groups)
     dev_count = max(1, int(len(groups) * dev_ratio))
     test_count = max(1, int(len(groups) * test_ratio))
     if dev_count + test_count >= len(groups):
         raise ValueError("not enough source groups for a nonempty train split")
-    mapping = {group: ("dev" if index < dev_count else
-                      "test" if index < dev_count + test_count else "train")
-               for index, group in enumerate(groups)}
+    # 同一来源组的题必须在同一层：层和划分一样以来源组为单位
+    strata = {}
+    for spec in specs:
+        stratum = _stratum_of(spec)
+        group = spec["source_group"]
+        if strata.setdefault(group, stratum) != stratum:
+            raise ValueError(f"{spec['task_id']}: source group crosses strata: {group}")
+    summary = None
+    if stratify and len(set(strata.values())) > 1:
+        mapping, summary = _stratified_mapping(groups, strata, seed, dev_count, test_count)
+    else:
+        random.Random(seed).shuffle(groups)
+        mapping = {group: ("dev" if index < dev_count else
+                           "test" if index < dev_count + test_count else "train")
+                   for index, group in enumerate(groups)}
     frozen = [{**spec, "split": mapping[spec["source_group"]]} for spec in specs]
     hashes = {}
     for spec in frozen:
@@ -66,6 +119,8 @@ def freeze_splits(specs: list[dict], seed: int = 42,
         "limitation": "Source groups must track original repositories/templates. "
                       "AST matching does not detect all semantic duplicates.",
     }
+    if summary:
+        manifest["stratified"] = summary
     return frozen, manifest
 
 
