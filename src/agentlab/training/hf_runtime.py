@@ -28,7 +28,7 @@ BASE_LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj",
 # 线性注意力层（Gated DeltaNet）的混合投影，Qwen2.5 没有这些模块。in_proj_a /
 # in_proj_b 的输出维度只有头数，不挂 LoRA。
 HYBRID_LORA_TARGETS = ("in_proj_qkv", "in_proj_z", "out_proj")
-QUANTIZATIONS = ("nf4", "bf16")
+QUANTIZATIONS = ("nf4", "int8", "bf16")
 
 
 def thinking_capable(tokenizer: Any) -> bool:
@@ -122,12 +122,14 @@ def load_tokenizer(source: str, revision: str | None = None, *,
 
 
 def quantization_config(quantization: str):
-    """NF4 双量化；'bf16' 表示不量化。"""
+    """NF4 双量化；'int8' 是 8 位整数权重（显存约为 bf16 的一半，精度更接近 bf16）；'bf16' 表示不量化。"""
     import torch
     from transformers import BitsAndBytesConfig
 
     if quantization == "bf16":
         return None
+    if quantization == "int8":
+        return BitsAndBytesConfig(load_in_8bit=True)
     if quantization != "nf4":
         raise ValueError(f"unknown quantization {quantization!r}; expected one of {QUANTIZATIONS}")
     return BitsAndBytesConfig(

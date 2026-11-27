@@ -532,15 +532,22 @@ def train(args: Any) -> dict[str, Any]:
     if torch.cuda.device_count() > 1:
         print("提示：显式使用 cuda:0，忽略其它可见 GPU", flush=True)
     torch.cuda.reset_peak_memory_stats()
-    print(f"加载基座模型 {args.model}（首次运行需下载权重；NF4 量化加载约 1-3 分钟，"
+    # 基座模型的精度：默认还是 NF4；bf16 / int8 时训练和部署（vLLM 用 bf16）的精度更接近。
+    # 用法见 scripts/rft_precision_probe.sh
+    quantization = getattr(args, "quantization", "nf4")
+    load_hint = {"nf4": "NF4 量化加载约 1-3 分钟", "int8": "int8 量化加载约 1-3 分钟",
+                 "bf16": "bf16 不量化，9B 模型的权重约占 18 GB 显存"}.get(quantization, "加载约 1-3 分钟")
+    print(f"加载基座模型 {args.model}（首次运行需下载权重；{load_hint}，"
           "此段无输出属正常）…", flush=True)
-    model = load_causal_lm(args.model, revision)
+    model = load_causal_lm(args.model, revision, quantization=quantization)
     # transformers 4.x 把实际加载的提交记在 config._commit_hash；5.x 不再设置这个属性。
     # 请求的版本是固定的完整提交号时，实际加载的就是它；评测端用同一个值核对。
     resolved_revision = getattr(model.config, "_commit_hash", None) or revision
-    model = prepare_model_for_kbit_training(
-        model, use_gradient_checkpointing=args.gradient_checkpointing,
-        gradient_checkpointing_kwargs={"use_reentrant": False})
+    if quantization != "bf16":
+        # 量化过的权重要先做这一步（把不接受 LoRA 的参数转成 fp32、接好梯度检查点）；不量化的模型不需要，还省显存
+        model = prepare_model_for_kbit_training(
+            model, use_gradient_checkpointing=args.gradient_checkpointing,
+            gradient_checkpointing_kwargs={"use_reentrant": False})
     model.config.use_cache = False
     if args.gradient_checkpointing:
         model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})

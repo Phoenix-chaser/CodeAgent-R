@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from agentlab.models import DEFAULT_MODEL
+from agentlab.training.hf_runtime import QUANTIZATIONS
 from agentlab.training.hf_sft import train
 
 
@@ -20,6 +21,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--revision", default=None,
                         help="基座模型 commit/revision；默认用该模型已核对的固定版本")
+    parser.add_argument("--quantization", choices=QUANTIZATIONS, default="nf4",
+                        help="基座模型用什么精度加载：nf4 是 4 位（默认，最省显存）；int8 是 8 位；bf16 是不量化"
+                             "（最接近部署时 vLLM 的精度，但 9B 模型的权重就占约 18 GB 显存）")
     parser.add_argument("--output", default="checkpoints/sft-v2")
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=1)

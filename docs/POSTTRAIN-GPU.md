@@ -337,7 +337,32 @@ TASKS_FILE=data/frozen-ladder-v2.jsonl RUN_DIR=data/rft-expanded RFT_TIERS=hard,
 WATCH=30 bash scripts/show_progress.sh rft-expanded.log "" run_rft.sh
 ```
 
-`RUN_DIR` 要给一个新的目录：采样协议里记着任务文件和采哪几层，和 `data/rft-round1` 里已有的对不上时，`sample_rft.py` 以退出码 2 结束。和第 1 轮比有四处不同：第 1 步多一行 `其中合成题（s3_、s3v_ 开头）train … / dev … / test …`；采样汇总和最后的表多出"合成难题""合成变体"两栏（第 2 步的标记里仍写着"难题和变体"，那是写死的）；`结果：验证组 … 分层 {…}` 那一行的"原有题"把合成题也算了进去（这一段只认 `h3_`、`h3v_` 两个前缀），分层以采样汇总和表为准；题多了以后采样、三个组在 dev 上的选型都跟着变慢，一晚跑不完就用上面的 `STAGES=sampling` 拆成两晚。这一轮具体怎么安排要等出题的结果再定：先看每批接受了多少族、基座在合成题上能做对多少，再定采哪几层、要不要拆。
+`RUN_DIR` 要给一个新的目录：采样协议里记着任务文件和采哪几层，和 `data/rft-round1` 里已有的对不上时，`sample_rft.py` 以退出码 2 结束。和第 1 轮比有三处不同：第 1 步多一行 `其中合成题（s3_、s3v_ 开头）train … / dev … / test …`；采样汇总和最后的表多出"合成难题""合成变体"两栏（第 2 步的标记里仍写着"难题和变体"，那是写死的）；题多了以后采样、各组的训练和选型都跟着变慢，一晚跑不完就用上面的 `STAGES=sampling` 拆成两晚。这一轮具体怎么安排要等出题的结果再定：先看每批接受了多少族、基座在合成题上能做对多少，再定采哪几层、要不要拆。
+
+### 精度对照：在 bf16 或 int8 下重训，再经 vLLM 评测
+
+为什么要做：RFT 那一轮是在 NF4 下训练、NF4 下选型的。同一组适配器放到 bf16 的 vLLM 里再评一遍，NF4 下的提升就没有了，基座自己还比 NF4 下多通过 16 道（见 README 的"两套评测的对照"）。`scripts/rft_precision_probe.sh` 用那一轮现成的训练数据、同样的超参，只换训练的精度，把各组的适配器重训一遍，再交给 vLLM 评测，回答的是：训练本身放到和部署一样的精度里，提升还在不在。
+
+```bash
+cd ~/jupyterlab/CodeAgent-R-v24 && if pgrep -f 'rft_precision_probe[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else TASKS_FILE=data/frozen-ladder-v2.1127.jsonl nohup bash scripts/rft_precision_probe.sh > rft-precision-bf16.log 2>&1 < /dev/null & echo "已启动"; fi
+```
+
+贴完应该看到 `已启动`。默认 `QUANT=bf16`，数据取自 `data/rft-expanded-1127`，重训 A-verified 和 C-control 两组：每组先训练，再评基座和两组（dev 165 题，贪心加每题采样 4 次）。估 40–60 分钟。bf16 的 9B 模型光权重就约 18 GB，能不能放下只有上了显卡才知道：训练报显存不足时脚本会说明，换成 int8 再跑一次（8 位权重，显存约一半，精度比 NF4 更接近 bf16）：
+
+```bash
+cd ~/jupyterlab/CodeAgent-R-v24 && if pgrep -f 'rft_precision_probe[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else TASKS_FILE=data/frozen-ladder-v2.1127.jsonl QUANT=int8 nohup bash scripts/rft_precision_probe.sh > rft-precision-int8.log 2>&1 < /dev/null & echo "已启动"; fi
+```
+
+看进度、取结果（int8 那一跑把日志名换成 `rft-precision-int8.log`）：
+
+```bash
+cd ~/jupyterlab/CodeAgent-R-v24 && WATCH=30 bash scripts/show_progress.sh rft-precision-bf16.log "" rft_precision_probe.sh
+```
+```bash
+grep -aE '^===== |结果：|显存不够|^(标签|base|A-verified|C-control)' ~/jupyterlab/CodeAgent-R-v24/rft-precision-bf16.log | python3 -c 'import sys; print("\n".join(l[:240] for l in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()))'
+```
+
+读法：和 README「两套评测的对照」那张表放在一起看。NF4 下训练的适配器在 vLLM 下是基座 84、A-verified 85、C-control 76。换成 bf16 或 int8 训练以后，A-verified 如果明显高于基座和对照组，说明之前的"没有提升"是训练精度造成的；如果还是一样，就是在更接近部署的精度下又得到了一次"答案对错不重要"。常用变量：`SOURCE_DIR`（取数据的那一轮的运行目录）、`TASKS_FILE`（要和那一轮用的是同一份阶梯，用它的快照最稳）、`ARMS`、`EPOCHS`、`LR`、`EVAL_SAMPLES`。中断后原样重跑，训练完的组不重训，vLLM 评过的部分跳过。这一跑不做 NF4 下的 dev 选型，直接拿最后一个 epoch 去评。
 
 ## 引导采样的一轮：前缀提示与教师技能
 
@@ -380,30 +405,30 @@ WATCH=30 bash scripts/show_progress.sh rft-expanded.log "" run_rft.sh
 
 ### 启动、看进度、取结果
 
-先把 `CodeAgent-R-v23.tar.gz` 上传到 `~/jupyterlab/`。第 1 轮的产物在 `CodeAgent-R-v19` 的 `data` 里，教师的密钥在旧包的 `.env` 里。下面这一条命令解压、把 `data` 接过来、找到 `.env` 就拷一份，然后在后台启动；重复粘贴不会起第二个。哪个旧包里都没有 `.env` 时它不启动，所以不会再出现"没有密钥也跑了一轮"：
+先把 `CodeAgent-R-v24.tar.gz` 上传到 `~/jupyterlab/`。第 1 轮的产物在 `CodeAgent-R-v19` 的 `data` 里，教师的密钥在旧包的 `.env` 里。下面这一条命令解压、把 `data` 接过来、找到 `.env` 就拷一份，然后在后台启动；重复粘贴不会起第二个。哪个旧包里都没有 `.env` 时它不启动，所以不会再出现"没有密钥也跑了一轮"：
 
 <!-- deliver:guided-launch -->
 ```bash
-cd ~/jupyterlab && tar -xzf CodeAgent-R-v23.tar.gz && cd CodeAgent-R-v23 && { [[ -e data ]] || ln -s ../CodeAgent-R-v19/data data; } && { if [[ ! -e .env ]]; then src=""; for f in ../CodeAgent-R-*/.env; do [[ -f "$f" ]] && src="$f"; done; if [[ -z "$src" ]]; then echo "没有找到 .env（里面要有 TEACHER_API_KEY）：把它放到 ~/jupyterlab/CodeAgent-R-v23/ 再粘一次"; false; else cp "$src" .env; echo "已从 $src 拷来 .env"; fi; fi; } && if pgrep -f run_rft_guided.sh > /dev/null; then echo "已经在运行，不重复启动"; else nohup bash scripts/run_rft_guided.sh > rft-guided.log 2>&1 < /dev/null & echo "已启动"; fi
+cd ~/jupyterlab && tar -xzf CodeAgent-R-v24.tar.gz && cd CodeAgent-R-v24 && { [[ -e data ]] || ln -s ../CodeAgent-R-v19/data data; } && { if [[ ! -e .env ]]; then src=""; for f in ../CodeAgent-R-*/.env; do [[ -f "$f" ]] && src="$f"; done; if [[ -z "$src" ]]; then echo "没有找到 .env（里面要有 TEACHER_API_KEY）：把它放到 ~/jupyterlab/CodeAgent-R-v24/ 再粘一次"; false; else cp "$src" .env; echo "已从 $src 拷来 .env"; fi; fi; } && if pgrep -f run_rft_guided.sh > /dev/null; then echo "已经在运行，不重复启动"; else nohup bash scripts/run_rft_guided.sh > rft-guided.log 2>&1 < /dev/null & echo "已启动"; fi
 ```
 
-第一次贴是两行：`已从 ../CodeAgent-R-v21/.env 拷来 .env`（是哪个旧包就写哪个；多个旧包里都有 `.env` 时取目录名排在最后的那个，版本号位数相同时就是版本号最大的，`v19` 和 `v21` 里取 `v21`）和 `已启动`（前面可能多一行 `[1] 进程号`）。`CodeAgent-R-v23` 里已经有 `.env` 时只打 `已启动`。看到 `没有找到 .env（里面要有 TEACHER_API_KEY）：把它放到 ~/jupyterlab/CodeAgent-R-v23/ 再粘一次`，是什么都没启动：把 `.env` 放进这个目录再粘一次。脚本已经在跑时看到的是 `已经在运行，不重复启动`，正在跑的那份不受影响。这一句只说明有哪个进程的命令行里带着脚本名，有两种情况脚本其实没在跑，这时什么都没启动：另一个终端里的进度面板还没退出，等它自己退出（半分钟内）或在那里按 Ctrl+C 退掉，再粘一次；这一条不是直接贴进终端，而是被包了一层执行的，`bash -c '…'` 这一类会匹配到它自己，要把它单独贴进终端。脚本开头的注释里另有一行启动命令（用 flock 防重复），不要和这一条混用：用这一条启动以后再去粘那一行，会起第二个；反过来先用那一行、再粘这一条，只会说"已经在运行"。
+第一次贴是两行：`已从 ../CodeAgent-R-v21/.env 拷来 .env`（是哪个旧包就写哪个；多个旧包里都有 `.env` 时取目录名排在最后的那个，版本号位数相同时就是版本号最大的，`v19` 和 `v21` 里取 `v21`）和 `已启动`（前面可能多一行 `[1] 进程号`）。`CodeAgent-R-v24` 里已经有 `.env` 时只打 `已启动`。看到 `没有找到 .env（里面要有 TEACHER_API_KEY）：把它放到 ~/jupyterlab/CodeAgent-R-v24/ 再粘一次`，是什么都没启动：把 `.env` 放进这个目录再粘一次。脚本已经在跑时看到的是 `已经在运行，不重复启动`，正在跑的那份不受影响。这一句只说明有哪个进程的命令行里带着脚本名，有两种情况脚本其实没在跑，这时什么都没启动：另一个终端里的进度面板还没退出，等它自己退出（半分钟内）或在那里按 Ctrl+C 退掉，再粘一次；这一条不是直接贴进终端，而是被包了一层执行的，`bash -c '…'` 这一类会匹配到它自己，要把它单独贴进终端。脚本开头的注释里另有一行启动命令（用 flock 防重复），不要和这一条混用：用这一条启动以后再去粘那一行，会起第二个；反过来先用那一行、再粘这一条，只会说"已经在运行"。
 
-看到了别的报错，就是解压或接数据那一步失败了，什么都没启动。看到了 `已启动`、面板却说"没有在运行"，就是脚本在第 1 步就停下了（显卡被占、缺第 1 轮的产物、找不到 vLLM 之类）：先看 `~/jupyterlab/CodeAgent-R-v23/rft-guided.log` 的开头和最后几行，原因和该怎么做都写在里面。每次启动都会重写这个日志，上一次的想留着就先拷走。这一轮的产物在 `data` 目录下的 `rft-guided` 里，而 `data` 接的是上一包的 `data`，所以从 v22 重跑会接着上一跑做。
+看到了别的报错，就是解压或接数据那一步失败了，什么都没启动。看到了 `已启动`、面板却说"没有在运行"，就是脚本在第 1 步就停下了（显卡被占、缺第 1 轮的产物、找不到 vLLM 之类）：先看 `~/jupyterlab/CodeAgent-R-v24/rft-guided.log` 的开头和最后几行，原因和该怎么做都写在里面。每次启动都会重写这个日志，上一次的想留着就先拷走。这一轮的产物在 `data` 目录下的 `rft-guided` 里，而 `data` 接的是上一包的 `data`，所以从 v22 重跑会接着上一跑做。
 
 启动一两分钟以后、睡觉以前再确认一件事：教师的密钥读到了没有。读不到时这一轮照常跑完，但没有 D-skill 组，而面板上看不出来（下面那条看进度的命令不筛这种提醒）。
 
 ```bash
-grep -n '没有 TEACHER_API_KEY' ~/jupyterlab/CodeAgent-R-v23/rft-guided.log
+grep -n '没有 TEACHER_API_KEY' ~/jupyterlab/CodeAgent-R-v24/rft-guided.log
 ```
 
-贴完什么都没有、直接回到提示符，就是读到了。打印出 `提醒：环境里没有 TEACHER_API_KEY…` 这一行（行首带着行号）就是没读到：拷来的 `.env` 里没有这一项（哪里都找不到 `.env` 时启动命令自己就停了，走不到这一步）。把 `TEACHER_API_KEY`（连同 `TEACHER_BASE_URL`、`TEACHER_MODEL`）写进 `~/jupyterlab/CodeAgent-R-v23/.env`，等这一跑结束后原样重跑，就会补上 D-skill 组。提示找不到 `rft-guided.log`，是脚本没起来，回头看上一条命令的报错。
+贴完什么都没有、直接回到提示符，就是读到了。打印出 `提醒：环境里没有 TEACHER_API_KEY…` 这一行（行首带着行号）就是没读到：拷来的 `.env` 里没有这一项（哪里都找不到 `.env` 时启动命令自己就停了，走不到这一步）。把 `TEACHER_API_KEY`（连同 `TEACHER_BASE_URL`、`TEACHER_MODEL`）写进 `~/jupyterlab/CodeAgent-R-v24/.env`，等这一跑结束后原样重跑，就会补上 D-skill 组。提示找不到 `rft-guided.log`，是脚本没起来，回头看上一条命令的报错。
 
 看进度（每 30 秒刷新一次，这一轮结束后自动回到提示符；Ctrl+C 只是停止观看，不影响后台任务。关掉网页也不影响后台任务，下次打开终端接着看）：
 
 <!-- deliver:guided-progress -->
 ```bash
-cd ~/jupyterlab/CodeAgent-R-v23 && WATCH=30 bash scripts/show_progress.sh rft-guided.log "" run_rft_guided.sh
+cd ~/jupyterlab/CodeAgent-R-v24 && WATCH=30 bash scripts/show_progress.sh rft-guided.log "" run_rft_guided.sh
 ```
 
 贴完应该看到一块面板：`状态: 进行中`，下面依次是 `步骤`（每一步标着 `[完成]` 或 `[进行中]`）、`当前进度`（最后几行进度条，最多 4 行；采样、评测、写技能的带已用和剩余时间，等 vLLM 加载的只有已用时间，刚启动的头几分钟就是后者）、`已出的结果`（到这时为止的 `结果：` 行、表格行和出错信息，只留最后 14 行）和 `日志最后 3 行`。最后一步里嵌着 vLLM 评测自己的 8 步，所以步骤不止 13 行。状态变成 `已完成` 或 `已结束，但没有全部完成` 时面板自动退出，后者的原因写在日志的最后一行。
@@ -412,7 +437,7 @@ cd ~/jupyterlab/CodeAgent-R-v23 && WATCH=30 bash scripts/show_progress.sh rft-gu
 
 <!-- deliver:guided-results -->
 ```bash
-grep -aE '^===== |结果：|一次都没通过|^(模型|base|epoch [0-9])|变好|自检|作废|可用的技能只有|D-skill 组|没全部写成' ~/jupyterlab/CodeAgent-R-v23/rft-guided.log | python3 -c 'import sys; print("\n".join(l[:240] for l in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()))'
+grep -aE '^===== |结果：|一次都没通过|^(模型|base|epoch [0-9])|变好|自检|作废|可用的技能只有|D-skill 组|没全部写成' ~/jupyterlab/CodeAgent-R-v24/rft-guided.log | python3 -c 'import sys; print("\n".join(l[:240] for l in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()))'
 ```
 
 贴完应该看到几十行，顺序和日志一样：
@@ -437,7 +462,7 @@ grep -aE '^===== |结果：|一次都没通过|^(模型|base|epoch [0-9])|变好
 任何一行再加上"基座或某一组的 vLLM 评测没评完"，最后一行都是 `===== 没有全部完成：… =====`，原因写在那一行里（可能有两句）；`VLLM_EVAL=0` 时没有这一种，步数各少一步。`没有全部完成`（退出码 1）不影响 dev 上的选型结果，读那一行里的原因，重新运行同一条命令只补没做完的。完整的两张 vLLM 表和"怎么读"在日志的末尾：
 
 ```bash
-sed -n '/── vLLM 评测/,$p' ~/jupyterlab/CodeAgent-R-v23/rft-guided.log
+sed -n '/── vLLM 评测/,$p' ~/jupyterlab/CodeAgent-R-v24/rft-guided.log
 ```
 
 每一步的产物都在 `data/rft-guided/`：
@@ -518,7 +543,7 @@ sed -n '/── vLLM 评测/,$p' ~/jupyterlab/CodeAgent-R-v23/rft-guided.log
 - 训练过的题通过得很少：模型连训练时见过的正确答案都没学会，训练信号太弱（先看 D 组训练集里引导题有几条）。
 - 训练过的题过了不少，没训练过的同族题和基座一样：这几道题学进去了，但跨不了族。
 
-dev 那张表（表一）每行是一个标签的贪心、采样通过率和 pass@4，下一行是各层的贪心结果。采样通过率比贪心灵敏，但只作旁证，下结论仍以 HF 贪心表为准。dev 上保留了基座的组没有适配器，不用评。只想重看这两张表时不必开 vLLM，在 `~/jupyterlab/CodeAgent-R-v23` 里运行：
+dev 那张表（表一）每行是一个标签的贪心、采样通过率和 pass@4，下一行是各层的贪心结果。采样通过率比贪心灵敏，但只作旁证，下结论仍以 HF 贪心表为准。dev 上保留了基座的组没有适配器，不用评。只想重看这两张表时不必开 vLLM，在 `~/jupyterlab/CodeAgent-R-v24` 里运行：
 
 ```bash
 python scripts/vllm_summary.py --run data/rft-guided --arms D-prefix D-skill F-control --probe-ids-file data/rft-guided/probe-ids.txt
@@ -559,14 +584,14 @@ python scripts/vllm_summary.py --run data/rft-guided --arms D-prefix D-skill F-c
 
 ### 启动、看进度、取结果
 
-教师的密钥从 `CodeAgent-R-v23` 目录里的 `.env` 读（`TEACHER_API_KEY`、`TEACHER_BASE_URL`、`TEACHER_MODEL`）。引导那一轮的启动命令已经把它拷过去了，所以先贴那一条；还没贴过就先把 `.env` 放进 `~/jupyterlab/CodeAgent-R-v23/`。先跑这一条也可以：`data` 还没接过来时脚本会自己把它接到上一包的 `data`（和引导那一轮共用）；`data` 已经是本包里的真实目录、里面又没有阶梯文件时，脚本会停下并说明怎么处理。下面这一条命令在后台启动第 1 批；重复粘贴不会起第二个：
+教师的密钥从 `CodeAgent-R-v24` 目录里的 `.env` 读（`TEACHER_API_KEY`、`TEACHER_BASE_URL`、`TEACHER_MODEL`）。引导那一轮的启动命令已经把它拷过去了，所以先贴那一条；还没贴过就先把 `.env` 放进 `~/jupyterlab/CodeAgent-R-v24/`。先跑这一条也可以：`data` 还没接过来时脚本会自己把它接到上一包的 `data`（和引导那一轮共用）；`data` 已经是本包里的真实目录、里面又没有阶梯文件时，脚本会停下并说明怎么处理。下面这一条命令在后台启动第 1 批；重复粘贴不会起第二个：
 
 <!-- deliver:synth-launch -->
 ```bash
-cd ~/jupyterlab/CodeAgent-R-v23 && if pgrep -f 'run_synth_pool[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else nohup bash scripts/run_synth_pool.sh > synth-batch1.log 2>&1 < /dev/null & echo "已启动"; fi
+cd ~/jupyterlab/CodeAgent-R-v24 && if pgrep -f 'run_synth_pool[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else nohup bash scripts/run_synth_pool.sh > synth-batch1.log 2>&1 < /dev/null & echo "已启动"; fi
 ```
 
-贴完应该看到 `已启动`（前面可能多一行 `[1] 进程号`；跑完以后回到终端，可能还多一行 `[1]+ Done …`）。脚本已经在跑时看到的是 `已经在运行，不重复启动`，正在跑的那份不受影响；这一句只说明有哪个进程的命令行里带着脚本名，另一个终端里的进度面板还没退出时也会这样，等它退出再粘。日志是 `~/jupyterlab/CodeAgent-R-v23/synth-batch1.log`：每次启动都会重写它，上一次的想留着就先拷走（`data/synth-pool/batch-N.log` 也只留最近一次向教师要题的输出）。没读到密钥时它只有三行：步骤标记 `===== 1/5 检查前提 =====` 和 `环境里没有 TEACHER_API_KEY：把 .env 放到项目目录（仓库根，和 scripts 并列），里面写 TEACHER_API_KEY=…；` 的两行说明，什么都没请求：把 `.env` 放进这个目录再粘一次。读到密钥时开头三行是：
+贴完应该看到 `已启动`（前面可能多一行 `[1] 进程号`；跑完以后回到终端，可能还多一行 `[1]+ Done …`）。脚本已经在跑时看到的是 `已经在运行，不重复启动`，正在跑的那份不受影响；这一句只说明有哪个进程的命令行里带着脚本名，另一个终端里的进度面板还没退出时也会这样，等它退出再粘。日志是 `~/jupyterlab/CodeAgent-R-v24/synth-batch1.log`：每次启动都会重写它，上一次的想留着就先拷走（`data/synth-pool/batch-N.log` 也只留最近一次向教师要题的输出）。没读到密钥时它只有三行：步骤标记 `===== 1/5 检查前提 =====` 和 `环境里没有 TEACHER_API_KEY：把 .env 放到项目目录（仓库根，和 scripts 并列），里面写 TEACHER_API_KEY=…；` 的两行说明，什么都没请求：把 `.env` 放进这个目录再粘一次。读到密钥时开头三行是：
 
 ```
 ===== 1/5 检查前提 =====
@@ -580,7 +605,7 @@ cd ~/jupyterlab/CodeAgent-R-v23 && if pgrep -f 'run_synth_pool[.]sh' > /dev/null
 
 <!-- deliver:synth-progress -->
 ```bash
-cd ~/jupyterlab/CodeAgent-R-v23 && WATCH=60 bash scripts/show_progress.sh synth-batch1.log '结果：|接受|拒绝' run_synth_pool.sh
+cd ~/jupyterlab/CodeAgent-R-v24 && WATCH=60 bash scripts/show_progress.sh synth-batch1.log '结果：|接受|拒绝' run_synth_pool.sh
 ```
 
 贴完应该看到一块面板：`状态: 进行中`；`步骤` 是五步（`1/5 检查前提` 到 `5/5 并入阶梯`），做完的标着 `[完成]`，跑完以后最后一行 `全部结束` 也列在这里；`当前进度` 是最后几行进度条；`已出的结果` 是到这时为止带"接受""拒绝"或者以 `结果：` 开头的行（只留最后 14 行），也就是每个题族的结论和后面的结果行；最下面是 `日志最后 3 行`。状态变成 `已完成` 时面板自动退出，说明五步都走完了；变成 `没有在运行（中途中断了，看最后几行找原因）` 是第 2 步没做完就停了，原因在日志的最后几行。
@@ -589,7 +614,7 @@ cd ~/jupyterlab/CodeAgent-R-v23 && WATCH=60 bash scripts/show_progress.sh synth-
 
 <!-- deliver:synth-results -->
 ```bash
-grep -aE '^===== |结果：|接受|拒绝' ~/jupyterlab/CodeAgent-R-v23/synth-batch1.log | python3 -c 'import sys; print("\n".join(l[:240] for l in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()))'
+grep -aE '^===== |结果：|接受|拒绝' ~/jupyterlab/CodeAgent-R-v24/synth-batch1.log | python3 -c 'import sys; print("\n".join(l[:240] for l in sys.stdin.buffer.read().decode("utf-8", "replace").splitlines()))'
 ```
 
 贴完应该看到六七十行，顺序和日志一样：
@@ -604,7 +629,7 @@ grep -aE '^===== |结果：|接受|拒绝' ~/jupyterlab/CodeAgent-R-v23/synth-ba
 `5/5` 后面没有 `结果：导出 …` 这一行，就是导出没有完成（脚本照样以"全部结束"收尾）。下一批怎么跑、有没有没做完的题族，写在第 2 步的末尾，不在这条命令的输出里。这两样和出错的说明用下面这一条看：
 
 ```bash
-grep -n -E '下一批这样跑|没有定论|导出|并入阶梯|没有跑完|没有一族能用|一个都没接受|全部出错|没打印出来|这一批停下了|写不进|立刻停下|TEACHER_API_KEY|排不出' ~/jupyterlab/CodeAgent-R-v23/synth-batch1.log
+grep -n -E '下一批这样跑|没有定论|导出|并入阶梯|没有跑完|没有一族能用|一个都没接受|全部出错|没打印出来|这一批停下了|写不进|立刻停下|TEACHER_API_KEY|排不出' ~/jupyterlab/CodeAgent-R-v24/synth-batch1.log
 ```
 
 一批正常跑完时带出来的是：`===== 5/5 并入阶梯 =====`；第 2 步末尾的 `下一批这样跑：BATCH=2 bash scripts/run_synth_pool.sh`；`结果：导出 …`；`并入阶梯：data/frozen-ladder-v2.jsonl = data/frozen-ladder.jsonl（原有的 327 道原样保留）+ 新题 N 道`。有没定论的题族时（教师调用出错、回复被截断或者没法解析、判分没能完成，见下面"续跑"）还多两行：第 2 步末尾的 `其中 N 族没有定论，不算用掉。只补它们、不要新主题：FAMILIES=N BATCH=1 bash scripts/run_synth_pool.sh`（N 是这一批里的），和汇总那一步的 `其中 M 族没有定论（…）…`（M 是整个题池里的）。别的行都是出了事，对下面的表。
@@ -646,7 +671,7 @@ grep -n -E '下一批这样跑|没有定论|导出|并入阶梯|没有跑完|没
 一批跑完（面板显示 `已完成`）再启动下一批：两条启动命令同时贴没有意义，前一条的 `pgrep` 和脚本里的锁都会拦住后一个。把启动命令改两处：日志名改成 `synth-batch2.log`，并在 `nohup` 的前面加上 `BATCH=2 `：
 
 ```bash
-cd ~/jupyterlab/CodeAgent-R-v23 && if pgrep -f 'run_synth_pool[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else BATCH=2 nohup bash scripts/run_synth_pool.sh > synth-batch2.log 2>&1 < /dev/null & echo "已启动"; fi
+cd ~/jupyterlab/CodeAgent-R-v24 && if pgrep -f 'run_synth_pool[.]sh' > /dev/null; then echo "已经在运行，不重复启动"; else BATCH=2 nohup bash scripts/run_synth_pool.sh > synth-batch2.log 2>&1 < /dev/null & echo "已启动"; fi
 ```
 
 `BATCH=2` 必须紧挨着写在 `nohup` 前面。写成 `nohup BATCH=2 bash …` 时 nohup 会把 `BATCH=2` 当成要运行的程序，报 `failed to run command`；写在这一整条的最前面也不行，那样它只作用到 `cd` 上。看进度、取结果的两条命令把 `synth-batch1.log` 换成 `synth-batch2.log`，其余不动。第 3 批以后照此类推。主题一共 545 个，第 10 批以后还剩 45 个，最后一批写 `BATCH=11 FAMILIES=45`（照 50 个要会报 `排不出第 11 批的主题`）。
