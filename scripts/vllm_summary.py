@@ -1,12 +1,15 @@
 """打印一轮 RFT 的 vLLM 评测（辅助指标）和族内探针的汇总表。
 
-用法：python scripts/vllm_summary.py --run 运行目录 --arms 组名… [--probe-ids-file 题号文件]
+用法：python scripts/vllm_summary.py --run 运行目录 --arms 组名… [--probe-ids-file 题号文件] [--split dev|test]
 
 读 <运行目录>/vllm/<标签>/ 下 scripts/eval_vllm.py 写出的 summary、报告和自检结果（标签是 base 或某个组名；
+表一读哪个划分由 --split 定，默认 dev：读的是 <标签>-<划分>- 那一套文件，表头和结论行里也写这个划分名。
+test 只在收尾时评一次留档，那时才用 --split test；
 自检没过，也就是适配器的输出和基座完全一样时，eval_vllm.py 不写 summary 和报告，只写 <标签>-probe-sanity.json，
 表二里这一组的原因从这里来；自检没能和基座比较的组在表二里注明没能确认适配器是否生效），
 再读 <运行目录>/sft/<组名>/train.jsonl 里出现过的题号，按固定版式打印四段：
-  一、vLLM 评测：每个标签在 dev 上的贪心、采样通过率和 pass@k，下一行是各层的贪心结果（只列有题的层）；
+  一、vLLM 评测：每个标签在 --split 那个划分（默认 dev）上的贪心、采样通过率和 pass@k，
+     下一行是各层的贪心结果（只列有题的层）；
   二、族内探针：训练过的题和没训练过的同族题各通过多少，括号里是基座的通过数；
   三、每张表后面一行以"结果："开头的结论（进度面板靠它认，也可以 grep 取）；
   四、怎么读。
@@ -33,6 +36,7 @@ HOW_TO_READ = (
     "族内探针分清是\"训练信号太弱\"还是\"跨不了族\"；",
     "test 这一轮不评。",
 )
+TEST_HOW_TO_READ = (*HOW_TO_READ[:3], "test 只在最后评一次（留档），不要反复评；")   # 表一是 test 时，最后一条换成这句
 TRAINED, UNTRAINED = "训练过的题", "没训练过的同族题"
 PARTS = ((TRAINED, "trained"), (UNTRAINED, "untrained"))     # 表二里一个组的两项
 TIERS_FILE = Path(__file__).resolve().parent.parent / "src" / "agentlab" / "benchmark" / "tiers.py"
@@ -85,7 +89,8 @@ def read_json(path):
 
 
 def load_part(run, label: str, stem: str) -> dict:
-    """某个标签在 dev 或 probe 上的 summary、贪心报告和自检结果。没有的项是 None；读不出来的原因放进 problems。
+    """某个标签在一个划分（dev、test）或 probe 上的 summary、贪心报告和自检结果。没有的项是 None；
+    读不出来的原因放进 problems。
 
     ``sanity`` 是自检结果（pass、total，以及和基座比较的 changed、compared 等）：先取 summary 的 sanity 字段；
     没有 summary（自检没过时 eval_vllm.py 以 4 退出、不往后评）或者 summary 里没有，就读 <label>-<stem>-sanity.json
@@ -335,9 +340,10 @@ def sanity_text(sanity, prefix: str) -> str:
     return text + f"；训练过的题严格通过 {passed}/{total}（仅供参考）"
 
 
-def render_dev_table(rows) -> list[str]:
+def render_dev_table(rows, split="dev") -> list[str]:
+    """表一。split 是这些行读的划分名，写在表头里。"""
     width = max([display_width(row["label"]) for row in rows] + [display_width("标签")]) + 2
-    lines = [cell("标签", width) + cell("dev 贪心", 12) + cell("采样通过率", 28) + "pass@k"]
+    lines = [cell("标签", width) + cell(f"{split} 贪心", 12) + cell("采样通过率", 28) + "pass@k"]
     for row in rows:
         label = cell(row["label"], width)
         if row["greedy"] is None:
@@ -404,12 +410,12 @@ def render_probe_table(base_row: dict, rows) -> list[str]:
     return lines
 
 
-def dev_verdict(rows) -> str:
-    """表一后面的结论行：各标签的贪心、采样通过率，以及相对基座多了几道。"""
+def dev_verdict(rows, split="dev") -> str:
+    """表一后面的结论行：各标签的贪心、采样通过率，以及相对基座多了几道。split 是结论行里写的划分名。"""
     have = [row for row in rows if row["greedy"] is not None]
     if not have:
         return "结果：vLLM 评测还没有可用的结果（summary 和报告没做完）"
-    text = "结果：dev 贪心 " + "、".join(f"{row['label']} {ratio(row['greedy'])}" for row in have)
+    text = f"结果：{split} 贪心 " + "、".join(f"{row['label']} {ratio(row['greedy'])}" for row in have)
     sampled = [row for row in have if sampled_rate(row["sampled"]) is not None]
     if sampled:
         text += "；采样通过率 " + "、".join(f"{row['label']} {sampled_rate(row['sampled']):.1%}" for row in sampled)
@@ -442,11 +448,17 @@ def probe_verdict(base_row: dict, rows) -> str:
     return text
 
 
-def report(run, arms, probe_ids_file=None) -> str:
-    """整个汇总的文本。arms 是各个组的名字，顺序照给；标签 base 的行只在评过基座时出现在表一。"""
-    base_dev = load_part(run, BASE, "dev")
-    labels = list(dict.fromkeys(([BASE] if base_dev["attempted"] else []) + [arm for arm in arms if arm != BASE]))
-    dev_rows = [dev_row(label, base_dev if label == BASE else load_part(run, label, "dev")) for label in labels]
+def how_to_read(split: str) -> tuple:
+    """"怎么读"的四条。最后一条说的是 test 的规矩：表一就是 test 的那一次，它换成另一句。"""
+    return TEST_HOW_TO_READ if split == "test" else HOW_TO_READ
+
+
+def report(run, arms, probe_ids_file=None, split="dev") -> str:
+    """整个汇总的文本。arms 是各个组的名字，顺序照；标签 base 的行只在评过基座时出现在表一。
+    split 是表一读的划分（dev 或 test）：读 <标签>-<划分>- 那一套文件，表头、结论行和"怎么读"里跟着写它。"""
+    base_eval = load_part(run, BASE, split)
+    labels = list(dict.fromkeys(([BASE] if base_eval["attempted"] else []) + [arm for arm in arms if arm != BASE]))
+    dev_rows = [dev_row(label, base_eval if label == BASE else load_part(run, label, split)) for label in labels]
 
     probe_ids, probe_note = None, ""
     if probe_ids_file:
@@ -460,12 +472,12 @@ def report(run, arms, probe_ids_file=None) -> str:
                               trained_task_ids(Path(run) / "sft" / arm / "train.jsonl"), base_probe)
                   for arm in dict.fromkeys(arms) if arm != BASE]
 
-    lines = [f"── {DEV_HEADING} ──", *render_dev_table(dev_rows), dev_verdict(dev_rows), "",
+    lines = [f"── {DEV_HEADING} ──", *render_dev_table(dev_rows, split), dev_verdict(dev_rows, split), "",
              f"── {PROBE_HEADING} ──"]
     if probe_note:
         lines.append(probe_note)
     lines += [*render_probe_table(base_row, group_rows), probe_verdict(base_row, group_rows), "", "── 怎么读 ──"]
-    lines += [f"  - {item}" for item in HOW_TO_READ]
+    lines += [f"  - {item}" for item in how_to_read(split)]
     return "\n".join(lines)
 
 
@@ -475,10 +487,12 @@ def main(argv=None) -> int:
     parser.add_argument("--arms", required=True, nargs="+", help="各个组的名字，照这个顺序打印")
     parser.add_argument("--probe-ids-file", default=None,
                         help="探针题号文件（run_rft_guided.sh 写的 probe-ids.txt）；不给就用探针报告里出现的题")
+    parser.add_argument("--split", default="dev", choices=("dev", "test"),
+                        help="表一读哪个划分的报告（<标签>-<划分>-*.json）；默认 dev。test 只在收尾时评一次留档")
     args = parser.parse_args(argv)
     if FALLBACK_NOTE:
         print(FALLBACK_NOTE, file=sys.stderr)
-    print(report(args.run, args.arms, args.probe_ids_file))
+    print(report(args.run, args.arms, args.probe_ids_file, args.split))
     return 0
 
 

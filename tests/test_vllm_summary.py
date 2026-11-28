@@ -320,6 +320,58 @@ def test_an_arm_that_dropped_below_the_base_is_reported_as_fewer_tasks(tmp_path)
         "结果：dev 贪心 base 8/16、F-control 6/16；采样通过率 base 17.2%、F-control 14.1%；相对基座 F-control -2 道")
 
 
+def test_the_test_split_reads_the_test_reports_and_names_the_split(tmp_path):
+    """--split test（项目收尾时留档评的那一次）：表一读 <标签>-test-* 那一套，dev 的报告一概不看，表头和结论行里
+    写 test，"怎么读"里也不再说"test 这一轮不评"。不带 --split 还是 dev 的那一套，两边互不相混。"""
+    run, ids = stage(tmp_path)
+    evaluation(run, "F-control", "dev", dev_rows(broke={"h3_d0", "h3_d3"}), sampled=sampled(4, 9, 5))
+    evaluation(run, "base", "test", dev_rows(fixed={"h3_d2"}), sampled=sampled(4, 20, 9))
+    evaluation(run, "D-prefix", "test", dev_rows())                        # F-control 没有 test 的报告
+
+    dev, probe, how = sections(vllm_summary.report(run, ["D-prefix", "F-control"], ids, split="test"))
+    assert dev[0] == DEV_HEADING and re.fullmatch(r"标签\s+test 贪心\s+采样通过率\s+pass@k", dev[1])
+    base = expect(dev, "base", r"9/16\s+31\.2%（20/64 次尝试）\s+pass@4 56\.2%")       # 不是 dev 的 8/16
+    assert re.fullmatch(r"\s+原有题 3/4、难题 3/6、变体 3/6", dev[dev.index(base) + 1])
+    d_prefix = expect(dev, "D-prefix", r"8/16\s+没采样\s+-")                          # 不是 dev 的 9/16
+    assert re.fullmatch(r"\s+原有题 3/4、难题 2/6、变体 3/6", dev[dev.index(d_prefix) + 1])
+    expect(dev, "F-control", r"没有结果（没做）")           # 它只有 dev 的报告：test 这张表不看
+    assert verdict(dev, "结果：") == (
+        "结果：test 贪心 base 9/16、D-prefix 8/16；采样通过率 base 31.2%；相对基座 D-prefix -1 道")
+    assert "dev" not in "\n".join(dev + how)
+    assert how == [HOW_HEADING, *HOW_TO_READ[:3], "  - test 只在最后评一次（留档），不要反复评；"]
+    expect(probe, "D-prefix", SPLIT)                                   # 表二（族内探针）不随划分变
+
+    plain, _, plain_how = sections(vllm_summary.report(run, ["D-prefix", "F-control"], ids))
+    assert re.fullmatch(r"标签\s+dev 贪心\s+采样通过率\s+pass@k", plain[1])
+    expect(plain, "base", r"8/16\s+17\.2%（11/64 次尝试）\s+pass@4 37\.5%")
+    expect(plain, "D-prefix", r"9/16\s+没采样\s+-")
+    expect(plain, "F-control", r"6/16\s+14\.1%（9/64 次尝试）\s+pass@4 31\.2%")
+    assert verdict(plain, "结果：") == (
+        "结果：dev 贪心 base 8/16、D-prefix 9/16、F-control 6/16；采样通过率 base 17.2%、F-control 14.1%；"
+        "相对基座 D-prefix +1 道、F-control -2 道")
+    assert "test 贪心" not in "\n".join(plain) and plain_how == [HOW_HEADING, *HOW_TO_READ]
+
+    # 只评过 dev 的运行目录：--split test 时表一什么都没有，不拿 dev 的数来顶
+    fresh, _ = stage(tmp_path / "fresh")
+    empty, _, _ = sections(vllm_summary.report(fresh, ["D-prefix", "F-control"], split="test"))
+    expect(empty, "D-prefix", r"没有结果（没做）")
+    expect(empty, "F-control", r"没有结果（没做）")
+    assert not any(line.startswith("base") for line in empty)
+    assert verdict(empty, "结果：") == "结果：vLLM 评测还没有可用的结果（summary 和报告没做完）"
+
+    # 命令行：--split test 打的和 report(…, split="test") 一样；不带就是 dev；别的划分是用法错误
+    command = [sys.executable, str(ROOT / "scripts/vllm_summary.py"), "--run", str(run),
+               "--arms", "D-prefix", "F-control"]
+    shown = subprocess.run([*command, "--split", "test", "--probe-ids-file", str(ids)], capture_output=True, text=True,
+                           timeout=60)
+    assert shown.returncode == 0 and shown.stderr == ""
+    assert shown.stdout == vllm_summary.report(run, ["D-prefix", "F-control"], ids, split="test") + "\n"
+    default = subprocess.run([*command, "--probe-ids-file", str(ids)], capture_output=True, text=True, timeout=60)
+    assert default.stdout == vllm_summary.report(run, ["D-prefix", "F-control"], ids) + "\n"
+    refused = subprocess.run([*command, "--split", "train"], capture_output=True, text=True, timeout=60)
+    assert refused.returncode == 2 and "--split" in refused.stderr
+
+
 def test_split_by_trained_keeps_the_order_and_tells_when_it_cannot_tell():
     assert vllm_summary.split_by_trained(["a", "b", "c", "d"], {"c", "a", "zzz"}) == (["a", "c"], ["b", "d"])
     assert vllm_summary.split_by_trained(["a"], set()) == ([], ["a"])             # 训练数据在，但一道都没训练过

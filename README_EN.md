@@ -14,7 +14,7 @@ The default model is **Qwen3.5-9B**, and the results on this page are centered o
 
 ## Table of contents
 
-1. [Results on Qwen3.5-9B](#results-on-qwen35-9b): takeaways, RFT after expanding the pool, synthetic-task difficulty, the default pool, the difficulty ladder, RFT against its control, guided sampling, the two evaluation stacks compared, and next steps
+1. [Results on Qwen3.5-9B](#results-on-qwen35-9b): takeaways, RFT after expanding the pool, synthetic-task difficulty, the default pool, the difficulty ladder, RFT against its control, guided sampling, the two evaluation stacks compared, and future directions
 2. [What keeps the results trustworthy](#what-keeps-the-results-trustworthy): grading, isolation, statistics, evidence, CI
 3. [Earlier results on Qwen2.5-Coder-7B-Instruct](#earlier-results-on-qwen25-coder-7b-instruct): the experiments run before the switch to Qwen3.5-9B
    - [Method comparison](#method-comparison): dev and test scores for Base, SFT, three DPO rounds, two RFT rounds, hybrid training, and Best-of-N
@@ -28,7 +28,7 @@ The default model is **Qwen3.5-9B**, and the results on this page are centered o
 
 ## Results on Qwen3.5-9B
 
-**Takeaways.** On Qwen3.5-9B, the whole pipeline ran end to end: teacher collection, RFT, guided sampling, synthetic task generation, and RFT after expanding the pool. The gain from fine-tuning is in-distribution: after the pool was expanded, dev as a whole rose by about 7 points, almost all of it on synthetic tasks, and nothing changed on the human-written tasks. In all four experiments, the control arm trained on wrong answers scored as high as the verified arm, so at this data scale no gain can be attributed to "correct answers". The gains also appear only under NF4 evaluation: when the same models were re-evaluated with vLLM (bf16), greedy decoding passed 84 tasks for Base, 85 for A-verified, and 76 for C-control, and the gain did not show up (see "The two evaluation stacks compared").
+**Takeaways.** On Qwen3.5-9B, the whole pipeline ran end to end: teacher collection, RFT, guided sampling, synthetic task generation, and RFT after expanding the pool. The gain from fine-tuning is in-distribution: after the pool was expanded, dev as a whole rose by about 7 points, almost all of it on synthetic tasks, and nothing changed on the human-written tasks. In all four experiments, the control arm trained on wrong answers scored as high as the verified arm, so at this data scale no gain can be attributed to "correct answers". The gains also appear only under NF4 evaluation: when the same models were re-evaluated with vLLM (bf16), greedy decoding passed 84 tasks for Base, 85 for A-verified, and 76 for C-control, and the gain did not show up (see "The two evaluation stacks compared"). Retraining in bf16 gives the same picture, so training precision is not the cause. Our reading is that the cause is the training data: the synthetic tasks are far easier than the human-written ones (Base passes 47% of samples against 17%), and what the model learns on easy tasks is what those tasks look like, which does not carry over to the human-written ones.
 
 **RFT after expanding the pool (165 dev tasks).** RFT was run again on the expanded ladder, sampling the two synthetic tiers as well. Training used 334 examples, one per task, of which 269 came from synthetic tasks; the total is 5.5 times round 1's 61. Tasks passed on the 165 dev tasks under greedy decoding:
 
@@ -105,7 +105,7 @@ The same Base model passed 16 more tasks under bf16 than under NF4 (the dev 66 t
 
 The last two rows are the two arms retrained in bf16 (`scripts/rft_precision_probe.sh`: the same 334 examples and hyperparameters, changing only the training precision), so training precision is not the cause. Greedy passes by tier: on the 66 human-written tasks no arm is above Base. The NF4-trained A-verified passed 27 (Base passed 32; the loss is entirely on the human-written variants, 17 → 12) and C-control passed 28; the bf16-trained A-verified passed 31 and C-control passed 32. On the 99 synthetic tasks only the NF4-trained A-verified rose noticeably (52 → 58); every other arm is within 3 tasks. In other words, the gain appears only on in-distribution synthetic tasks, and it comes at the expense of the human-written ones.
 
-**Next steps.** The direction is to filter training data by difficulty, to run preference optimization on correct and incorrect samples from the same task, and to move checkpoint selection to the vLLM (bf16) evaluation.
+**Future directions (not attempted in this project).** Bring the training data closer to the difficulty of the target tasks (filter by difficulty, generate harder synthetic tasks), run preference optimization on correct and incorrect samples from the same task, reinforcement learning with execution rewards, and move checkpoint selection to the vLLM (bf16) evaluation.
 
 ## What keeps the results trustworthy
 

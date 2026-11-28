@@ -11,6 +11,10 @@
 #                                         完全一样（eval_vllm.py 退出码 4）这组的 vLLM 评测就作废。自检拿不到
 #                                         基座名、找不到训练数据时没法比较：不作废，结束时说明没能确认
 #   EVAL_SAMPLES=4                        dev 上每题采样几次（0 表示只做贪心）
+#   EVAL_SPLIT=test                       改评 test 划分（默认 dev）：报告写成 <标签>-test-*.json，汇总也读这一套；
+#                                         dev 评过了不算 test 评过。评 test 是项目收尾时留档用的一次性操作，不要反复评
+#                                         （项目里 test 只在最后评一次），命令里只列要留档的那几组。写在命令前面就行，
+#                                         不要 export：run_rft_guided.sh 等脚本调本脚本时环境里留着它，那一轮也会去评 test
 # 其余同 run_rft.sh：MODEL、MODEL_REVISION、TASKS_FILE、VLLM_BIN、VLLM_PORT、RFT_GRADE_WORKERS、RFT_POLL_SECONDS。
 # 评过的部分已在就跳过，中断后重新启动会接着评；一组出错不影响别的组。vLLM 中途退出（显存不足、被系统杀掉）时
 # 重新启动一次：把被打断的那一组没评完的部分补上，再接着评剩下的组；每次运行最多重启一次，重启后 vLLM 又不在了
@@ -36,9 +40,12 @@ VLLM_BIN="${VLLM_BIN:-$HOME/vllm-qwen/bin/vllm}"
 VLLM_PORT="${VLLM_PORT:-8000}"
 GRADE_WORKERS="${RFT_GRADE_WORKERS:-4}"
 EVAL_SAMPLES="${EVAL_SAMPLES:-4}"
+EVAL_SPLIT="${EVAL_SPLIT:-dev}"        # 评哪个划分：dev（平时）或 test（收尾时留档评一次）
 PROBE_IDS_FILE="${PROBE_IDS_FILE:-}"
 INCLUDE_BASE="${INCLUDE_BASE:-0}"
 EXPECT_REPRODUCE="${EXPECT_REPRODUCE:-}"
+[[ "$EVAL_SPLIT" == dev || "$EVAL_SPLIT" == test ]] \
+  || { echo "EVAL_SPLIT 只能是 dev 或 test：$EVAL_SPLIT" >&2; exit 1; }    # 划分名是报告文件名里的一段，不能随便写
 TOTAL=8
 STARTED=$SECONDS
 FAILED=0            # 有没评完的部分：不打印"全部结束"，以 1 退出
@@ -64,7 +71,7 @@ in_expect() {        # 组名是否列在 EXPECT_REPRODUCE 里
 
 eval_pending() {     # 标签 输出目录：还有没评完的部分（要开着 vLLM 做）返回 0
   local label="$1" out="$2"
-  rft_eval_done "$out" "$label" dev || return 0
+  rft_eval_done "$out" "$label" "$EVAL_SPLIT" || return 0    # 评过没有按这次的划分查：评过 dev 不算评过 test
   [[ -n "$PROBE_IDS_FILE" ]] && ! rft_eval_done "$out" "$label" probe
 }
 
@@ -206,7 +213,7 @@ if [[ "$INCLUDE_BASE" != 1 ]]; then
 elif eval_pending base "$RUN/vllm/base"; then
   echo "===== 5/$TOTAL 评基座 ====="
   if revive_vllm; then
-    rc=0; rft_eval_vllm "$MODEL" base "$RUN/vllm/base" "$EVAL_SAMPLES" "$PROBE_IDS_FILE" || rc=$?
+    rc=0; rft_eval_vllm "$MODEL" base "$RUN/vllm/base" "$EVAL_SAMPLES" "$PROBE_IDS_FILE" "" "$EVAL_SPLIT" || rc=$?
     (( rc == 0 )) || note_failure "基座" "$rc"
   else
     not_evaluated "基座"
@@ -217,7 +224,7 @@ fi
 
 evaluate_group() {   # 组名 [再评一次]：评一组。自检没过的记进 VOID，自检没能比较的记进 UNCONFIRMED；没评完的部分由 note_failure 记下
   local name="$1" again="${2:-}" out="$RUN/vllm/$1" probe_todo=0 sanity="" rc=0 why
-  probe_todo=0                                   # 探针还没评：先评它，自检没过就不往下评 dev
+  probe_todo=0                                   # 探针还没评：先评它，自检没过就不往下评这次的划分（dev 或 test）
   [[ -z "$PROBE_IDS_FILE" ]] || rft_eval_done "$out" "$name" probe || probe_todo=1
   sanity=""
   if (( probe_todo )) && in_expect "$name"; then
@@ -233,7 +240,7 @@ evaluate_group() {   # 组名 [再评一次]：评一组。自检没过的记进
   if [[ -n "$again" ]]; then    # 上一次评到一半 vLLM 退出了：评过的部分会跳过，只补没评完的
     echo "===== 6/$TOTAL $name：vLLM 中途退出，重新启动后再评一次 ====="
   else
-    echo "===== 6/$TOTAL $name：$( (( probe_todo )) && echo "先探针后 dev" || echo "dev" ) ====="
+    echo "===== 6/$TOTAL $name：$( (( probe_todo )) && echo "先探针后 $EVAL_SPLIT" || echo "$EVAL_SPLIT" ) ====="
   fi
   rc=0
   if (( probe_todo )); then
@@ -251,7 +258,7 @@ evaluate_group() {   # 组名 [再评一次]：评一组。自检没过的记进
       UNCONFIRMED+=("$name（$why）")
     fi
   fi
-  rft_eval_vllm "$name" "$name" "$out" "$EVAL_SAMPLES" || rc=$?
+  rft_eval_vllm "$name" "$name" "$out" "$EVAL_SAMPLES" "" "" "$EVAL_SPLIT" || rc=$?
   (( rc == 0 )) || note_failure "$name" "$rc"
 }
 
@@ -287,6 +294,7 @@ fi
 echo "===== 8/$TOTAL 汇总 ====="
 summary_args=(--run "$RUN" --arms "$@")
 [[ -z "$PROBE_IDS_FILE" ]] || summary_args+=(--probe-ids-file "$PROBE_IDS_FILE")
+[[ "$EVAL_SPLIT" == dev ]] || summary_args+=(--split "$EVAL_SPLIT")     # dev 是汇总脚本自己的默认值，不用带
 python scripts/vllm_summary.py "${summary_args[@]}" \
   || echo "汇总没打印出来（把上面的报错贴给我）；已经评完的报告都在 $RUN/vllm"
 

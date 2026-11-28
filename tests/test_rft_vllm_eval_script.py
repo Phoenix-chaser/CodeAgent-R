@@ -4,9 +4,9 @@
 假的 python 给 eval_vllm.py 写出像样的产物（文件名和 summary 照它的约定；vllm_summary.py 用真的去读），
 假的 vllm 服务把自己的启动参数记下来，假的 nvidia-smi 按环境变量报显存，假的 pkill 只管这次演练自己的进程。
 演的是编排本身——先探针后 dev、自检没过（适配器的输出和基座完全一样）就作废、自检没能比较的不作废只注明、
-重跑时跳过、服务起不来或显卡被占时怎么停；
+重跑时跳过、服务起不来或显卡被占时怎么停、EVAL_SPLIT=test 时改评 test 划分；
 库函数挨个调一遍。最后一个用例不用假的 python：库函数真的去调 eval_vllm.py（服务是本机的假服务，
-判分是真的），核对两边的文件名和字段对得上。全程不碰真的显卡和服务。
+判分是真的），核对两边的文件名和字段对得上；划分那个参数也是这样对着真的 eval_vllm.py 核对的。全程不碰真的显卡和服务。
 """
 import contextlib
 import json
@@ -326,6 +326,13 @@ def write_frozen_split(repo):
     rows += [{"task_id": task, "split": "dev"} for task in ("h3_d1", "h3v_d1", "v2_d1")]
     write(repo / "data/frozen-ladder.jsonl", "".join(json.dumps(row) + "\n" for row in rows))
     write(repo / PROBE, "".join(f"h3_t{index}\n" for index in range(1, 5)))
+
+
+def write_test_split(repo):
+    """冻结划分里再加 3 道 test 题（三层各一道）：EVAL_SPLIT=test 评的就是它们。"""
+    rows = [{"task_id": task, "split": "test"} for task in ("h3_x01", "h3v_x01", "v2_x01")]
+    with (repo / "data/frozen-ladder.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write("".join(json.dumps(row) + "\n" for row in rows))
 
 
 def processes(stage):
@@ -755,6 +762,75 @@ def test_switches_that_do_not_go_together_are_pointed_out(stage):
     assert "（还没有基座的探针报告：汇总里各组的括号不写基座的通过数；要写的话加 INCLUDE_BASE=1）" in result.stdout
     assert evaluations(calls) == [("D-prefix", "probe", "0", None), ("D-prefix", "dev", "0", None)]
     assert not list((vllm_output(repo) / "D-prefix").glob("*sampled*"))      # EVAL_SAMPLES=0：只做贪心
+
+
+def test_eval_split_test_evaluates_the_test_split_and_the_summary_reads_it(stage):
+    """EVAL_SPLIT=test（项目收尾时留档评的那一次）：eval_vllm.py 收到 --split test，报告是 <标签>-test-*.json，
+    步骤标记、汇总的参数、表头和结论行都写 test。评过 dev 不算评过 test，两套各记各的；划分名乱写时一上来就拒收，
+    不碰显卡。"""
+    repo = stage / "repo"
+    selected(repo, *GROUPS)
+    write_test_split(repo)
+    result, calls = run(stage, *GROUPS, EVAL_SPLIT="train")
+    assert result.returncode == 1 and calls == [] and starts(stage) == []
+    assert "EVAL_SPLIT 只能是 dev 或 test：train" in result.stderr and "===== 1/8" not in result.stdout
+
+    result, calls = run(stage, "D-prefix")                            # 平时那一轮先评了 dev
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert evaluations(calls) == [("D-prefix", "dev", "4", None)]
+
+    result, calls = run(stage, *GROUPS, EVAL_SPLIT="test", INCLUDE_BASE="1")
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-2000:]
+    assert steps(result) == [
+        "1/8 读取各组的选型结果", "2/8 确定要评的对象", "3/8 检查显卡", "4/8 启动 vLLM", "5/8 评基座",
+        "6/8 D-prefix：test", "6/8 D-skill：test", "6/8 F-control：test", "7/8 关闭 vLLM", "8/8 汇总", "全部结束"]
+    # D-prefix 的 dev 评过了也不算：test 照样评
+    assert evaluations(calls) == [
+        ("base", "test", "4", None), ("D-prefix", "test", "4", None), ("D-skill", "test", "4", None),
+        ("F-control", "test", "4", None)]
+    assert all(args.endswith("--split test --samples 4") for _, args in calls[:-1])
+    parts = ("greedy.json", "sampled-k4.json", "summary.json")
+    assert sorted(path.relative_to(vllm_output(repo)).as_posix() for path in vllm_output(repo).glob("*/*")) == sorted(
+        [f"D-prefix/D-prefix-dev-{part}" for part in parts]             # dev 的那一套原样留着
+        + [f"{label}/{label}-test-{part}" for label in ("base", *GROUPS) for part in parts])
+    assert not alive(stage)
+    # 汇总是真的 vllm_summary.py，带着 --split test 读上面写出的产物：表头和结论行里写 test，不写 dev
+    assert calls[-1] == ("summary", f"scripts/vllm_summary.py --run {RUN} --arms {' '.join(GROUPS)} --split test")
+    assert re.search(r"^标签\s+test 贪心\s+采样通过率\s+pass@k$", result.stdout, re.M)
+    assert ("结果：test 贪心 base 1/3、D-prefix 2/3、D-skill 1/3、F-control 1/3；采样通过率 base 8.3%、D-prefix 8.3%、"
+            "D-skill 8.3%、F-control 8.3%；相对基座 D-prefix +1 道、D-skill 持平、F-control 持平") in result.stdout
+    assert "test 只在最后评一次（留档），不要反复评" in result.stdout and "test 这一轮不评" not in result.stdout
+    assert "dev 贪心" not in result.stdout and f"结果：vLLM 评测做完了；报告在 {RUN}/vllm" in result.stdout
+
+    # 留档只评这一次：同一条命令再跑，test 都评过了，服务都不用开
+    again, calls = run(stage, *GROUPS, EVAL_SPLIT="test", INCLUDE_BASE="1")
+    assert again.returncode == 0, again.stderr[-1000:]
+    assert calls == [("summary", f"scripts/vllm_summary.py --run {RUN} --arms {' '.join(GROUPS)} --split test")]
+    assert starts(stage) == [] and again.stdout.count("已经评过，跳过") == 4
+
+    # 平时（不带 EVAL_SPLIT）照旧是 dev：汇总不带 --split，读的也还是 dev 那一套
+    result, calls = run(stage, "D-prefix")
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert calls == [("summary", f"scripts/vllm_summary.py --run {RUN} --arms D-prefix")]
+    assert starts(stage) == [] and result.stdout.count("已经评过，跳过") == 1
+    assert re.search(r"^标签\s+dev 贪心\s+采样通过率\s+pass@k$", result.stdout, re.M)
+    assert "结果：dev 贪心 D-prefix 1/3；采样通过率 D-prefix 8.3%" in result.stdout and "test 贪心" not in result.stdout
+
+    # 带探针时是"先探针后 test"：自检没过就和评 dev 时一样作废，不往下评 test
+    shutil.rmtree(vllm_output(repo) / "D-prefix")
+    switches = dict(EVAL_SPLIT="test", PROBE_IDS_FILE=PROBE, EXPECT_REPRODUCE="D-prefix")
+    result, calls = run(stage, "D-prefix", **switches, STUB_SANITY="D-prefix=0")
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-1000:]
+    assert "===== 6/8 D-prefix：先探针后 test =====" in result.stdout
+    assert evaluations(calls) == [("D-prefix", "probe", "0", f"{RUN}/sft/D-prefix/train.jsonl")]
+    assert not (vllm_output(repo) / "D-prefix/D-prefix-test-summary.json").exists()
+    assert calls[-1] == ("summary", f"scripts/vllm_summary.py --run {RUN} --arms D-prefix --probe-ids-file {PROBE} "
+                                   "--split test")
+    result, calls = run(stage, "D-prefix", **switches)              # 自检过了：探针重做，接着评 test
+    assert result.returncode == 0, result.stderr[-1000:]
+    assert [(label, stem) for label, stem, *_ in evaluations(calls)] == [("D-prefix", "probe"), ("D-prefix", "test")]
+    assert "===== 6/8 D-prefix：先探针后 test =====" in result.stdout
+    assert steps(result)[-1] == "全部结束" and not alive(stage)
 
 
 def test_an_unknown_revision_is_not_replaced_by_a_group_name(stage):
@@ -1212,5 +1288,78 @@ def test_the_library_drives_the_real_eval_vllm_and_the_summary_reads_what_it_wri
         assert row("F-control", r"训练过的题 1/1、没训练过的同族题 2/2")      # 它的训练数据里只有 1 道探针题
         assert row("D-skill", r"（评测作废或没做）；自检：适配器的输出在 3 道题里有 0 道和基座不同（门槛 1），"
                     r"适配器在 vLLM 里没有生效；训练过的题严格通过 0/3（仅供参考）")
+    finally:
+        fake.close()
+
+
+def test_the_split_is_the_last_argument_of_the_eval_helpers_and_the_real_scripts_follow_it(tmp_path, dead_proxy):
+    """rft_eval_dev 的第 5 个参数、rft_eval_vllm 的第 7 个是划分，不给就是 dev。不用假的 python：库函数真的去调
+    scripts/eval_vllm.py（服务是本机的假服务、判分是真的），它收到 --split test 时写出的就是 <标签>-test-*，和 dev 的
+    各占各的名字，"评过没有"也各查各的；真的 vllm_summary.py --split test 读的正是这一套。"""
+    sys.path.insert(0, str(ROOT / "tests"))
+    from test_rft_sampling import FakeVLLM
+
+    specs = [tiny("h3_d1", "dev"), tiny("h3v_d1", "dev"), tiny("h3_x1", "test"), tiny("h3v_x1", "test")]
+    run, tasks = tmp_path / "run", tmp_path / "tasks.jsonl"
+    write(tasks, "".join(json.dumps(spec, ensure_ascii=False) + "\n" for spec in specs))
+    install(tmp_path, "bin", "python", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')      # 脚本里写的是 python
+
+    def answer(payload):
+        if payload["max_tokens"] == 1:             # 探测参数用的请求（只生成 1 个 token）
+            return 200, {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]}
+        user = payload["messages"][-1]["content"]
+        spec = next(item for item in specs if f"文件 {item['module']}：" in user)
+        code = spec["fixed"] if spec["split"] == "test" else spec["buggy"]     # test 题答对、dev 题答错：两边的数不一样
+        return 200, {"choices": [{"message": {"content": f"```python\n{code}```"}, "finish_reason": "stop"}]}
+
+    fake = FakeVLLM(answer)
+    try:
+        settings = (f"RUN={shlex.quote(str(run))} TASKS={shlex.quote(str(tasks))} GRADE_WORKERS=2"
+                    f" VLLM_PORT={fake.url.rsplit(':', 1)[1]}")
+
+        def library(*statements):
+            environment = {**os.environ, "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}"}
+            environment.pop("AGENTLAB_SANDBOX", None)
+            program = f"source scripts/rft_lib.sh; {settings}; " + " ".join(statements)
+            return subprocess.run(["bash", "-c", program], cwd=ROOT, env=environment, capture_output=True, text=True,
+                                  timeout=600)
+
+        skipped = "base 的 {} 评测已经有了，跳过\nrc=0\n"
+        out = shlex.quote(str(run / "vllm/base"))
+        result = library(f"rft_eval_dev org/model base {out} 1 test; echo rc=$?")
+        assert result.stdout.strip().endswith("rc=0"), result.stdout[-2000:] + result.stderr[-2000:]
+        assert "----- base：test 上评（贪心，每题再采样 1 次）-----" in result.stdout
+        folder = run / "vllm/base"
+        test_files = {"base-test-greedy.json", "base-test-records.jsonl", "base-test-sampled-k1.json",
+                      "base-test-summary.json"}
+        assert {item.name for item in folder.iterdir()} == test_files     # eval_vllm.py 用 split 名当文件名里的一段
+        on_test = json.loads((folder / "base-test-summary.json").read_text(encoding="utf-8"))
+        assert on_test["split"] == "test" and (on_test["greedy"]["pass"], on_test["greedy"]["total"]) == (2, 2)
+        # 评过了就跳过：rft_eval_dev 自己认得出，经 rft_eval_vllm 传下去也认得出
+        assert library(f"rft_eval_dev org/model base {out} 1 test; echo rc=$?").stdout == skipped.format("test")
+        assert library(f"rft_eval_vllm org/model base {out} 1 '' '' test; echo rc=$?").stdout == skipped.format("test")
+
+        result = library(f"rft_eval_dev org/model base {out} 1 ''; echo rc=$?")      # 第 5 个参数不给（空串）：dev
+        assert "----- base：dev 上评（贪心，每题再采样 1 次）-----" in result.stdout
+        assert result.stdout.strip().endswith("rc=0"), result.stdout[-2000:] + result.stderr[-2000:]
+        on_dev = json.loads((folder / "base-dev-summary.json").read_text(encoding="utf-8"))
+        assert on_dev["split"] == "dev" and (on_dev["greedy"]["pass"], on_dev["greedy"]["total"]) == (0, 2)
+        assert library(f"rft_eval_dev org/model base {out} 1; echo rc=$?").stdout == skipped.format("dev")
+        assert library(f"rft_eval_vllm org/model base {out} 1; echo rc=$?").stdout == skipped.format("dev")
+        assert {item.name for item in folder.iterdir()} == test_files | {          # 两套各占各的名字
+            "base-dev-greedy.json", "base-dev-records.jsonl", "base-dev-sampled-k1.json", "base-dev-summary.json"}
+
+        def summary(*extra):
+            return subprocess.run([sys.executable, str(ROOT / "scripts/vllm_summary.py"), "--run", str(run),
+                                   "--arms", "A", *extra], capture_output=True, text=True, timeout=60)
+
+        shown = summary("--split", "test")
+        assert shown.returncode == 0, shown.stderr
+        assert re.search(r"^标签\s+test 贪心\s+采样通过率\s+pass@k$", shown.stdout, re.M)
+        assert re.search(r"^base\s+2/2[ \t]+100\.0%（2/2 次尝试）[ \t]+pass@1 100\.0%$", shown.stdout, re.M)
+        assert "结果：test 贪心 base 2/2；采样通过率 base 100.0%" in shown.stdout and "dev 贪心" not in shown.stdout
+        plain = summary()                                           # 不带 --split：读的是 dev 那一套
+        assert re.search(r"^base\s+0/2[ \t]+0\.0%（0/2 次尝试）[ \t]+pass@1 0\.0%$", plain.stdout, re.M)
+        assert "结果：dev 贪心 base 0/2；采样通过率 base 0.0%" in plain.stdout and "test 贪心" not in plain.stdout
     finally:
         fake.close()

@@ -236,18 +236,19 @@ sys.exit(1)
 PY
 }
 
-rft_eval_dev() {                       # 模型名 标签 输出目录 [采样次数；0 或不给就是只贪心]
-  local model="$1" label="$2" out="$3" samples="${4:-}"
-  if rft_eval_done "$out" "$label" dev; then
-    echo "$label 的 dev 评测已经有了，跳过"
+rft_eval_dev() {                       # 模型名 标签 输出目录 [采样次数；0 或不给就是只贪心] [划分；不给就是 dev]
+  # 划分是报告文件名里的一段（<标签>-<划分>-*.json），"评过没有"也按它查：dev 评过了不算 test 评过，反过来也一样
+  local model="$1" label="$2" out="$3" samples="${4:-}" split="${5:-dev}"
+  if rft_eval_done "$out" "$label" "$split"; then
+    echo "$label 的 $split 评测已经有了，跳过"
     return 0
   fi
   local args=(--tasks-file "$TASKS" --vllm-url "http://127.0.0.1:${VLLM_PORT:-8000}" --model "$model"
-              --label "$label" --output-dir "$out" --grade-workers "${GRADE_WORKERS:-4}" --split dev)
+              --label "$label" --output-dir "$out" --grade-workers "${GRADE_WORKERS:-4}" --split "$split")
   [[ -z "$samples" ]] || args+=(--samples "$samples")
   local how="贪心"
   [[ -z "$samples" || "$samples" == 0 ]] || how="贪心，每题再采样 $samples 次"
-  echo "----- $label：dev 上评（$how）-----"
+  echo "----- $label：$split 上评（$how）-----"
   mkdir -p "$out"
   python scripts/eval_vllm.py "${args[@]}"
 }
@@ -272,12 +273,13 @@ rft_eval_probe() {                     # 模型名 标签 输出目录 探针题
   python scripts/eval_vllm.py "${args[@]}"
 }
 
-rft_eval_vllm() {                      # 模型名 标签 输出目录 [采样次数] [探针题号文件] [自检用的训练数据]
-  # 先评 dev（贪心加采样），再评探针（只贪心）。两部分各自"评过了就跳过"；返回值取两者退出码里较大的。
+rft_eval_vllm() {                      # 模型名 标签 输出目录 [采样次数] [探针题号文件] [自检用的训练数据] [划分；不给就是 dev]
+  # 先评 dev（贪心加采样；最后给了划分就是评那个划分），再评探针（只贪心）。两部分各自"评过了就跳过"；
+  # 返回值取两者退出码里较大的。
   # 要先评探针、自检没过就不评 dev（rft_vllm_eval.sh 对每一组就是这样做的），分两次调：先 rft_eval_probe，
   # 退出码是 4 就停下，否则再 rft_eval_vllm
-  local model="$1" label="$2" out="$3" samples="${4:-0}" ids="${5:-}" sanity="${6:-}" rc=0 code=0
-  rft_eval_dev "$model" "$label" "$out" "$samples" || rc=$?
+  local model="$1" label="$2" out="$3" samples="${4:-0}" ids="${5:-}" sanity="${6:-}" split="${7:-dev}" rc=0 code=0
+  rft_eval_dev "$model" "$label" "$out" "$samples" "$split" || rc=$?
   if [[ -n "$ids" ]]; then
     rft_eval_probe "$model" "$label" "$out" "$ids" "$sanity" || code=$?
     (( code <= rc )) || rc=$code
