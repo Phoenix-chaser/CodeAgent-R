@@ -97,7 +97,11 @@ rft_start_vllm() {                     # 日志文件 [vllm serve 的额外参�
   for i in $(seq 1 "$attempts"); do
     if grep -q 'Application startup complete' "$log" 2>/dev/null; then ready=1; break; fi
     if grep -q 'Engine core initialization failed' "$log" 2>/dev/null; then reason="引擎初始化失败"; break; fi
-    if ! kill -0 "$RFT_VLLM_PID" 2>/dev/null; then reason="进程在就绪之前就退出了"; break; fi
+    # 进程可能刚好看完日志、还没轮到查它就写完退出了：日志里写明了原因就说具体的
+    if ! kill -0 "$RFT_VLLM_PID" 2>/dev/null; then
+      if grep -q 'Engine core initialization failed' "$log" 2>/dev/null; then reason="引擎初始化失败"; else reason="进程在就绪之前就退出了"; fi
+      break
+    fi
     (( i % 3 != 0 )) || rft_progress "$i" "$attempts" "等待 vLLM 加载"
     sleep "$poll"
   done

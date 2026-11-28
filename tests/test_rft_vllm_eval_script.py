@@ -239,6 +239,17 @@ NO_SLEEP = r'''#!/usr/bin/env bash
 exit 0
 '''
 
+MISS_ONCE_GREP = r'''#!/usr/bin/env bash
+# 演练时序用的 grep：第一次被问日志里有没有 Engine core initialization failed 时，等假的 vllm 自己退出以后再回答
+# "没有这一行"，也就是它刚好在脚本查日志之后、查进程之前写完就退了；其余的调用照常
+if [[ "$*" == *'Engine core initialization failed'* && ! -e "$STAGE/missed" ]]; then
+  touch "$STAGE/missed"
+  sleep 0.5
+  exit 1
+fi
+exec @REAL@ "$@"
+'''
+
 HARNESS = r'''#!/usr/bin/env bash
 # 测试用：设好变量，按名字调用 scripts/rft_lib.sh 里的一个函数，最后一行打印它的返回值
 cd "$(dirname "$0")/.."
@@ -973,6 +984,16 @@ def test_start_vllm_waits_for_ready_and_says_why_it_could_not(stage):
     result = harness(stage, "start-stop-vllm", "data/run/vllm.log", VLLM_BIN="/nowhere/bin/vllm")
     assert last(result) == "rc=1 alive_after_stop=0" and starts(stage) == []
     assert "找不到 vLLM：/nowhere/bin/vllm（用 VLLM_BIN 指定它的路径）" in result.stdout
+
+
+def test_a_failure_written_between_the_log_check_and_the_liveness_check_is_still_named(stage):
+    """查日志时那一行还没写完、查进程时它已经退了：原因还是说具体的（引擎初始化失败），日志照样给用户看。"""
+    install(stage, "missgrep", "grep", MISS_ONCE_GREP.replace("@REAL@", shutil.which("grep")))
+    result = harness(stage, "start-stop-vllm", "data/run/vllm.log", FAKE_VLLM_MODE="oom", first=[stage / "missgrep"])
+    assert last(result) == "rc=1 alive_after_stop=0", result.stdout + result.stderr
+    assert "vLLM 没起来（引擎初始化失败），日志最后 15 行：" in result.stdout
+    assert "torch.OutOfMemoryError: CUDA out of memory." in result.stdout
+    assert "进程在就绪之前就退出了" not in result.stdout
 
 
 def test_stop_vllm_also_clears_a_server_left_behind(stage):

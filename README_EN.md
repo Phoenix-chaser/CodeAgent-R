@@ -2,7 +2,7 @@
 
 **Post-training for code repair** · [中文](README.md)
 
-[![Checks](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml/badge.svg)](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml) ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) ![QLoRA NF4](https://img.shields.io/badge/QLoRA-NF4-8A2BE2) ![Transformers 4.x / 5.x](https://img.shields.io/badge/Transformers-4.x%20%2F%205.x-FFD21E) ![tests](https://img.shields.io/badge/tests-1310%20passed-brightgreen) ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+[![Checks](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml/badge.svg)](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml) ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) ![QLoRA NF4](https://img.shields.io/badge/QLoRA-NF4-8A2BE2) ![Transformers 4.x / 5.x](https://img.shields.io/badge/Transformers-4.x%20%2F%205.x-FFD21E) ![tests](https://img.shields.io/badge/tests-1318%20passed-brightgreen) ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 CodeAgent-R is a reproducible pipeline for post-training and execution-based evaluation of code repair: a frozen task pool, grading by execution, QLoRA SFT / DPO / RFT, selection on dev, and a paired comparison with the base model (Base) on frozen test data.
 

@@ -2,7 +2,7 @@
 
 **代码修复模型的后训练与执行评测** · [English](README_EN.md)
 
-[![Checks](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml/badge.svg)](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml) ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) ![QLoRA NF4](https://img.shields.io/badge/QLoRA-NF4-8A2BE2) ![Transformers 4.x / 5.x](https://img.shields.io/badge/Transformers-4.x%20%2F%205.x-FFD21E) ![tests](https://img.shields.io/badge/tests-1310%20passed-brightgreen) ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+[![Checks](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml/badge.svg)](https://github.com/Phoenix-chaser/CodeAgent-R/actions/workflows/checks.yml) ![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white) ![QLoRA NF4](https://img.shields.io/badge/QLoRA-NF4-8A2BE2) ![Transformers 4.x / 5.x](https://img.shields.io/badge/Transformers-4.x%20%2F%205.x-FFD21E) ![tests](https://img.shields.io/badge/tests-1318%20passed-brightgreen) ![License MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
 
 CodeAgent-R 是一套可复现的代码修复后训练与评测流水线：冻结任务池、执行判分、QLoRA SFT / DPO / RFT、在 dev 上选型、在冻结的 test 上与基座模型（Base）配对比较。
 
