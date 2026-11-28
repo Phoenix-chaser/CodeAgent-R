@@ -92,13 +92,18 @@ After training, on the 66 dev tasks, the prefix-guided arm (D-prefix) passed 28,
 
 **The two evaluation stacks compared.** Unless stated otherwise, the numbers on this page come from transformers + NF4. The same models were also evaluated on the 165 dev tasks with vLLM (bf16), both greedy decoding and 4 samples per task:
 
-| Arm | vLLM greedy passes | Sample pass rate (4 × 165) | pass@4 | For comparison: NF4 greedy passes |
-| --- | ---: | ---: | ---: | ---: |
-| Base | 84/165 | 42.4% (280/660) | 65.5% | 68/165 |
-| A-verified | 85/165 | 48.0% (317/660) | 68.5% | 79/165 |
-| C-control | 76/165 | 45.8% (302/660) | 64.8% | 81/165 |
+| Arm | Trained in | vLLM greedy passes | Sample pass rate (4 × 165) | pass@4 | For comparison: NF4 greedy passes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Base | — | 84/165 | 42.4% (280/660) | 65.5% | 68/165 |
+| A-verified | NF4 | 85/165 | 48.0% (317/660) | 68.5% | 79/165 |
+| C-control | NF4 | 76/165 | 45.8% (302/660) | 64.8% | 81/165 |
+| Base (a second run) | — | 85/165 | 43.3% (286/660) | 64.2% | — |
+| A-verified | bf16 | 85/165 | 50.2% (331/660) | 66.7% | — |
+| C-control | bf16 | 82/165 | 45.5% (300/660) | 66.7% | — |
 
 The same Base model passed 16 more tasks under bf16 than under NF4 (the dev 66 tasks point the same way: 33 against 29). The two stacks differ in weight precision and in prompt rendering, so this gap cannot be attributed to quantization alone. The NF4 gains in the table above (+11 and +13) do not appear under bf16: greedy decoding gives +1 and −8, and the sample pass rate gives +5.6 and +3.4 points. Compare numbers only within the same evaluation stack.
+
+The last two rows are the two arms retrained in bf16 (`scripts/rft_precision_probe.sh`: the same 334 examples and hyperparameters, changing only the training precision), so training precision is not the cause. Greedy passes by tier: on the 66 human-written tasks no arm is above Base. The NF4-trained A-verified passed 27 (Base passed 32; the loss is entirely on the human-written variants, 17 → 12) and C-control passed 28; the bf16-trained A-verified passed 31 and C-control passed 32. On the 99 synthetic tasks only the NF4-trained A-verified rose noticeably (52 → 58); every other arm is within 3 tasks. In other words, the gain appears only on in-distribution synthetic tasks, and it comes at the expense of the human-written ones.
 
 **Next steps.** The direction is to filter training data by difficulty, to run preference optimization on correct and incorrect samples from the same task, and to move checkpoint selection to the vLLM (bf16) evaluation.
 
